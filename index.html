@@ -1,0 +1,2285 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#12161B" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<title>Estudos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&family=Poppins:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.2/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #12161B; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #root { min-height: 100vh; }
+  input, select, textarea, button { font-family: inherit; touch-action: manipulation; }
+  button { min-height: 38px; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2B3440; border-radius: 4px; }
+  @media (min-width: 860px) {
+    .app-main { padding-top: 28px !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// ---------- helpers ----------
+const uid = () => Math.random().toString(36).slice(2, 10);
+const DAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const DAY_LABELS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+const LETTERS = ["A", "B", "C", "D", "E"];
+const STORAGE_KEY = "study-app-state-v1";
+const hasStorage = typeof window !== "undefined" && !!window.storage;
+
+function fmtTime(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+}
+
+function fmtDuration(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return `${h}h${m > 0 ? ` ${m}min` : ""}`;
+  if (m > 0) return `${m}min`;
+  return `${s}s`;
+}
+
+const PALETTE = ["#E8A33D", "#4FB4A8", "#C4677D", "#7C9BC2", "#8FBF5F", "#B58AD9", "#D9A0E0", "#5FA8D3"];
+
+const SEED_SUBJECTS = [
+  { id: uid(), name: "Matemática", color: "#E8A33D" },
+  { id: uid(), name: "Física", color: "#4FB4A8" },
+  { id: uid(), name: "Português", color: "#C4677D" },
+  { id: uid(), name: "Inglês", color: "#7C9BC2" },
+];
+
+const FONT_OPTIONS = {
+  inter: { label: "Inter", family: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  poppins: { label: "Poppins", family: "'Poppins', sans-serif" },
+  space: { label: "Space Grotesk", family: "'Space Grotesk', sans-serif" },
+  fraunces: { label: "Fraunces", family: "'Fraunces', serif" },
+};
+const CELEBRATION_EMOJIS = ["🔥", "⭐", "🎉", "💪", "🏆", "✅", "🚀", "🐉"];
+
+const CardStyleContext = React.createContext("rounded");
+const CARD_STYLE_OPTIONS = [
+  { id: "rounded", label: "Arredondado" },
+  { id: "square", label: "Quadrado" },
+  { id: "minimal", label: "Minimalista" },
+  { id: "balloon", label: "Balão de mensagem" },
+  { id: "transparent", label: "Transparente" },
+];
+const CARD_STYLE_LOOKS = {
+  rounded: { background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 10 },
+  square: { background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 2 },
+  minimal: { background: "transparent", border: "none", borderRadius: 0, borderBottom: "1px solid var(--line)" },
+  balloon: { background: "var(--surface)", border: "none", borderRadius: "20px 20px 20px 6px", boxShadow: "0 3px 12px rgba(0,0,0,0.28)" },
+  transparent: { background: "rgba(26,32,39,0.4)", border: "1px solid var(--line)", borderRadius: 10, backdropFilter: "blur(8px)" },
+};
+
+const SYNC_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function genSyncCode() {
+  let s = "";
+  for (let i = 0; i < 6; i++) s += SYNC_CODE_CHARS[Math.floor(Math.random() * SYNC_CODE_CHARS.length)];
+  return s;
+}
+
+function playBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = "sine";
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + 0.5);
+  } catch (e) {}
+}
+
+// ---------- PDF extraction ----------
+async function extractPdfText(file) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  let full = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    let pageText = "";
+    let lastY = null;
+    content.items.forEach((item) => {
+      const y = item.transform[5];
+      if (lastY !== null && Math.abs(y - lastY) > 4) pageText += "\n";
+      pageText += item.str + " ";
+      lastY = y;
+    });
+    full += pageText + "\n\n";
+  }
+  return full;
+}
+
+async function extractAnyText(file) {
+  if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+    return extractPdfText(file);
+  }
+  return file.text();
+}
+
+// ---------- exam / gabarito parsing ----------
+function parseExamText(rawText) {
+  const text = rawText.replace(/\r\n/g, "\n").trim();
+  const splitRegex = /quest[ãa]o\s*0*(\d{1,3})\b[:.\-]?/gi;
+  const matches = [...text.matchAll(splitRegex)];
+  if (matches.length === 0) return [];
+
+  const blocks = [];
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index + matches[i][0].length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    const num = parseInt(matches[i][1], 10);
+    blocks.push({ num, chunk: text.slice(start, end).trim() });
+  }
+
+  return blocks.map(({ num, chunk }) => {
+    const altRegex = /(^|\n)\s*([A-E])[\)\.\-]\s*(.+?)(?=\n\s*[A-E][\)\.\-]\s|$)/gs;
+    const alts = {};
+    let statementEnd = chunk.length;
+    let firstMatch = null;
+    for (const m of chunk.matchAll(altRegex)) {
+      const letter = m[2];
+      const content = m[3].trim().replace(/\n+/g, " ");
+      alts[letter] = content;
+      if (firstMatch === null) firstMatch = m.index + m[1].length;
+    }
+    if (firstMatch !== null) statementEnd = firstMatch;
+    const statement = chunk.slice(0, statementEnd).trim().replace(/\n+/g, " ");
+    return { num, statement, alternatives: alts, hasAllAlts: LETTERS.every((l) => alts[l]) };
+  });
+}
+
+function parseAnswerKey(rawText) {
+  const text = rawText.replace(/\r\n/g, "\n").trim();
+  const lineRegex = /0*(\d{1,3})\s*[-–\).:]?\s*([A-E])\b/gi;
+  const map = {};
+  for (const m of text.matchAll(lineRegex)) map[parseInt(m[1], 10)] = m[2].toUpperCase();
+  return map;
+}
+
+// ---------- metas: projeção de horas ----------
+function weeklyPlannedHours(blocks) {
+  return blocks.reduce((sum, b) => sum + (b.durationMin || 60), 0) / 60;
+}
+
+function daysUntil(dateStr) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(dateStr + "T00:00:00");
+  return Math.round((target - today) / 86400000);
+}
+
+function totalStudiedHours(sessions) {
+  return sessions.reduce((a, s) => a + s.seconds, 0) / 3600;
+}
+
+function recentDailyPaceHours(sessions, windowDays) {
+  const cutoff = Date.now() - windowDays * 86400000;
+  const recent = sessions.filter((s) => new Date(s.endedAt).getTime() >= cutoff);
+  if (recent.length === 0) return null;
+  const hours = recent.reduce((a, s) => a + s.seconds, 0) / 3600;
+  return hours / windowDays;
+}
+
+// ---------- guia de estudos: status e progresso ----------
+const STATUS_ORDER = ["nao_estudado", "estudando", "revisando", "duvida", "dominado"];
+const STATUS_META = {
+  nao_estudado: { label: "Não estudado", color: "#8A96A3", weight: 0 },
+  estudando: { label: "Estudando", color: "#7C9BC2", weight: 0.33 },
+  revisando: { label: "Revisando", color: "#E8A33D", weight: 0.66 },
+  duvida: { label: "Com dúvida", color: "#D97066", weight: 0.33 },
+  dominado: { label: "Dominado", color: "#8FBF5F", weight: 1 },
+};
+function nextStatus(status) {
+  const i = STATUS_ORDER.indexOf(status);
+  return STATUS_ORDER[(i + 1) % STATUS_ORDER.length];
+}
+function topicCompletion(topic) {
+  if (topic.subtopics && topic.subtopics.length) {
+    return topic.subtopics.reduce((a, st) => a + (STATUS_META[st.status]?.weight ?? 0), 0) / topic.subtopics.length;
+  }
+  return STATUS_META[topic.status]?.weight ?? 0;
+}
+function subjectCompletionPct(subjectId, topics) {
+  const list = topics.filter((t) => t.subjectId === subjectId);
+  if (list.length === 0) return null;
+  const avg = list.reduce((a, t) => a + topicCompletion(t), 0) / list.length;
+  return Math.round(avg * 100);
+}
+function buildSuggestionPool(subjects, topics, blocks) {
+  const todayWeekday = new Date().getDay();
+  const todaySubjectIds = new Set(blocks.filter((b) => b.day === todayWeekday).map((b) => b.subjectId));
+  const pool = [];
+  topics.forEach((t) => {
+    const subj = subjects.find((s) => s.id === t.subjectId);
+    if (!subj) return;
+    if (t.subtopics && t.subtopics.length) {
+      t.subtopics.forEach((st) => {
+        if (st.status === "nao_estudado" || st.status === "duvida") {
+          pool.push({ subject: subj, topicName: t.name, name: st.name, status: st.status });
+        }
+      });
+    } else if (t.status === "nao_estudado" || t.status === "duvida") {
+      pool.push({ subject: subj, topicName: null, name: t.name, status: t.status });
+    }
+  });
+  pool.forEach((p) => { p.plannedToday = todaySubjectIds.has(p.subject.id); });
+  pool.sort((a, b) => (b.plannedToday - a.plannedToday));
+  return pool;
+}
+
+function downloadJSON(dataObj, filename) {
+  const blob = new Blob([JSON.stringify(dataObj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ---------- root ----------
+function StudyApp() {
+  const [tab, setTab] = useState("painel");
+  const [subjects, setSubjects] = useState(SEED_SUBJECTS);
+  const [blocks, setBlocks] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [questions, setQuestions] = useState([]);
+  const [goals, setGoals] = useState([]);
+  const [topics, setTopics] = useState([]);
+  const [accent, setAccent] = useState("#E8A33D");
+  const [wallpaper, setWallpaper] = useState(null);
+  const [appName, setAppName] = useState("Estudos");
+  const [greeting, setGreeting] = useState("");
+  const [font, setFont] = useState("inter");
+  const [timerSound, setTimerSound] = useState(true);
+  const [celebrationEmoji, setCelebrationEmoji] = useState("🔥");
+  const [cardStyle, setCardStyle] = useState("rounded");
+  const [loaded, setLoaded] = useState(false);
+  const [syncState, setSyncState] = useState("idle"); // idle | saving | saved | error
+  const saveTimer = useRef(null);
+  const firstSaveSkipped = useRef(false);
+
+  function applyLoadedData(data) {
+    if (!data || typeof data !== "object") return;
+    if (Array.isArray(data.subjects) && data.subjects.length) setSubjects(data.subjects);
+    if (Array.isArray(data.blocks)) setBlocks(data.blocks);
+    if (Array.isArray(data.sessions)) setSessions(data.sessions);
+    if (Array.isArray(data.questions)) setQuestions(data.questions);
+    if (Array.isArray(data.goals)) setGoals(data.goals);
+    if (Array.isArray(data.topics)) setTopics(data.topics);
+    if (data.accent) setAccent(data.accent);
+    if (data.wallpaper) setWallpaper(data.wallpaper);
+    if (data.appName) setAppName(data.appName);
+    if (typeof data.greeting === "string") setGreeting(data.greeting);
+    if (data.font) setFont(data.font);
+    if (typeof data.timerSound === "boolean") setTimerSound(data.timerSound);
+    if (data.celebrationEmoji) setCelebrationEmoji(data.celebrationEmoji);
+    if (data.cardStyle) setCardStyle(data.cardStyle);
+  }
+
+  // load saved state once — localStorage é o mecanismo real (funciona em qualquer navegador,
+  // incluindo hospedado fora do Claude); window.storage (se existir) é só um bônus extra
+  useEffect(() => {
+    (async () => {
+      let data = null;
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) data = JSON.parse(raw);
+      } catch (e) {
+        // localStorage indisponível (aba anônima muito restrita, etc.) — segue sem dado local
+      }
+      if (!data && hasStorage) {
+        try {
+          const res = await window.storage.get(STORAGE_KEY);
+          if (res && res.value) data = JSON.parse(res.value);
+        } catch (e) {}
+      }
+      applyLoadedData(data);
+      setLoaded(true);
+    })();
+  }, []);
+
+  // persist on change (debounced), skipping the very first render after load
+  useEffect(() => {
+    if (!loaded) return;
+    if (!firstSaveSkipped.current) { firstSaveSkipped.current = true; return; }
+    setSyncState("saving");
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const payload = JSON.stringify({ subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle });
+      let localOk = false;
+      try {
+        localStorage.setItem(STORAGE_KEY, payload);
+        localOk = true;
+      } catch (e) {
+        // provavelmente estourou a cota (payload grande, ex: papel de parede em foto) — avisa
+      }
+      if (hasStorage) {
+        try { await window.storage.set(STORAGE_KEY, payload); } catch (e) {}
+      }
+      setSyncState(localOk ? "saved" : "error");
+    }, 500);
+    return () => clearTimeout(saveTimer.current);
+  }, [subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
+
+  // avisa antes de fechar/recarregar se não deu pra salvar localmente
+  useEffect(() => {
+    const hasData = subjects.length > 4 || blocks.length > 0 || sessions.length > 0 || questions.length > 0 || goals.length > 0 || topics.length > 0;
+    const unreliable = syncState === "error";
+    function handleBeforeUnload(e) {
+      if (loaded && hasData && unreliable) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [subjects, blocks, sessions, questions, goals, topics, loaded, syncState]);
+
+  function wipeAllData() {
+    setSubjects(SEED_SUBJECTS);
+    setBlocks([]);
+    setSessions([]);
+    setQuestions([]);
+    setGoals([]);
+    setTopics([]);
+    setAccent("#E8A33D");
+    setWallpaper(null);
+    setAppName("Estudos");
+    setGreeting("");
+    setFont("inter");
+    setTimerSound(true);
+    setCelebrationEmoji("🔥");
+    setCardStyle("rounded");
+  }
+
+  function exportBackup() {
+    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
+  }
+
+  // backup automático opcional: baixa um .json sozinho quando há mudanças, sem substituir o backup manual
+  const [autoBackup, setAutoBackup] = useState(false);
+  const stateRef = useRef();
+  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  const lastAutoPayload = useRef(null);
+
+  useEffect(() => {
+    if (!autoBackup) return;
+    const id = setInterval(() => {
+      const payload = JSON.stringify(stateRef.current);
+      const hasData = stateRef.current.subjects.length > 0 && (stateRef.current.sessions.length > 0 || stateRef.current.topics.length > 0 || stateRef.current.blocks.length > 0 || stateRef.current.questions.length > 0 || stateRef.current.goals.length > 0);
+      if (hasData && payload !== lastAutoPayload.current) {
+        downloadJSON(stateRef.current, `estudos-auto-backup-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`);
+        lastAutoPayload.current = payload;
+      }
+    }, 10 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [autoBackup]);
+
+  function importBackup(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (Array.isArray(data.subjects)) setSubjects(data.subjects);
+          if (Array.isArray(data.blocks)) setBlocks(data.blocks);
+          if (Array.isArray(data.sessions)) setSessions(data.sessions);
+          if (Array.isArray(data.questions)) setQuestions(data.questions);
+          if (Array.isArray(data.goals)) setGoals(data.goals);
+          if (Array.isArray(data.topics)) setTopics(data.topics);
+          if (data.accent) setAccent(data.accent);
+          if (data.wallpaper !== undefined) setWallpaper(data.wallpaper);
+          if (data.appName) setAppName(data.appName);
+          if (typeof data.greeting === "string") setGreeting(data.greeting);
+          if (data.font) setFont(data.font);
+          if (typeof data.timerSound === "boolean") setTimerSound(data.timerSound);
+          if (data.celebrationEmoji) setCelebrationEmoji(data.celebrationEmoji);
+          if (data.cardStyle) setCardStyle(data.cardStyle);
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      };
+      reader.onerror = () => reject(new Error("read failed"));
+      reader.readAsText(file);
+    });
+  }
+
+  const vars = {
+    "--bg": "#12161B", "--surface": "#1A2027", "--surface2": "#212933", "--line": "#2B3440",
+    "--text": "#E9EDF1", "--muted": "#8A96A3", "--accent": accent, "--accent2": "#4FB4A8",
+    "--danger": "#D97066", "--ok": "#8FBF5F",
+  };
+
+  if (!loaded) {
+    return (
+      <div style={{ ...vars, background: "var(--bg)", color: "var(--muted)", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13.5 }}>
+        Carregando seus dados...
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      ...vars, background: "var(--bg)", color: "var(--text)", minHeight: "100vh", display: "flex", flexDirection: "column",
+      fontFamily: FONT_OPTIONS[font]?.family || FONT_OPTIONS.inter.family,
+      ...(wallpaper?.type === "image"
+        ? { backgroundImage: `linear-gradient(rgba(10,13,16,0.72), rgba(10,13,16,0.72)), url(${wallpaper.value})`, backgroundSize: "cover", backgroundPosition: "center", backgroundAttachment: "fixed" }
+        : wallpaper?.type === "gradient"
+        ? { backgroundImage: wallpaper.value }
+        : {}),
+    }}>
+      <Header tab={tab} setTab={setTab} syncState={syncState} appName={appName} />
+      <CardStyleContext.Provider value={cardStyle}>
+      <main className="app-main" style={{ flex: 1, padding: "20px 16px 40px", maxWidth: 720, margin: "0 auto", width: "100%" }}>
+        {tab === "painel" && <Painel subjects={subjects} blocks={blocks} sessions={sessions} topics={topics} setTopics={setTopics} setTab={setTab} greeting={greeting} />}
+        {tab === "materias" && <Materias
+          subjects={subjects} setSubjects={setSubjects} blocks={blocks} setBlocks={setBlocks}
+          sessions={sessions} setSessions={setSessions} questions={questions} setQuestions={setQuestions}
+          goals={goals} setGoals={setGoals} topics={topics} setTopics={setTopics}
+          accent={accent} setAccent={setAccent} wallpaper={wallpaper} setWallpaper={setWallpaper}
+          onWipe={wipeAllData} onExport={exportBackup} onImport={importBackup}
+          autoBackup={autoBackup} setAutoBackup={setAutoBackup}
+          appName={appName} setAppName={setAppName} greeting={greeting} setGreeting={setGreeting}
+          font={font} setFont={setFont} timerSound={timerSound} setTimerSound={setTimerSound}
+          celebrationEmoji={celebrationEmoji} setCelebrationEmoji={setCelebrationEmoji}
+          cardStyle={cardStyle} setCardStyle={setCardStyle}
+        />}
+        {tab === "guia" && <GuiaEstudos subjects={subjects} setSubjects={setSubjects} topics={topics} setTopics={setTopics} />}
+        {tab === "calendario" && <Calendario subjects={subjects} blocks={blocks} sessions={sessions} goals={goals} setGoals={setGoals} />}
+        {tab === "cronometro" && <Cronometro subjects={subjects} sessions={sessions} setSessions={setSessions} timerSound={timerSound} />}
+        {tab === "sessoes" && <Sessoes subjects={subjects} sessions={sessions} />}
+        {tab === "questoes" && <QuestionBank subjects={subjects} questions={questions} setQuestions={setQuestions} setTab={setTab} celebrationEmoji={celebrationEmoji} />}
+        {tab === "importar" && <Importer subjects={subjects} setQuestions={setQuestions} setTab={setTab} />}
+      </main>
+      </CardStyleContext.Provider>
+    </div>
+  );
+}
+
+// ---------- header / nav ----------
+function Header({ tab, setTab, syncState, appName }) {
+  const items = [
+    { id: "painel", label: "Painel" },
+    { id: "materias", label: "Matérias & Plano" },
+    { id: "guia", label: "Guia de Estudos" },
+    { id: "calendario", label: "Calendário" },
+    { id: "cronometro", label: "Cronômetro" },
+    { id: "questoes", label: "Questões" },
+    { id: "importar", label: "Importar" },
+    { id: "sessoes", label: "Sessões" },
+  ];
+  const syncLabel = { saving: "Salvando...", saved: "Salvo neste navegador", error: "Não consegui salvar — use backup" }[syncState];
+  const syncColor = syncState === "error" ? "#E8A33D" : "var(--muted)";
+
+  return (
+    <header style={{ borderBottom: "1px solid var(--line)", background: "var(--surface)", position: "sticky", top: 0, zIndex: 5 }}>
+      <div style={{ maxWidth: 720, margin: "0 auto", padding: "14px 16px 0" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
+          <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "-0.01em" }}>{appName || "Estudos"}</span>
+          <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>v0.8.1</span>
+          {syncLabel && <span style={{ fontSize: 11, color: syncColor, marginLeft: "auto" }}>{syncLabel}</span>}
+        </div>
+        <nav style={{ display: "flex", gap: 4, overflowX: "auto" }}>
+          {items.map((it) => {
+            const active = tab === it.id;
+            return (
+              <button key={it.id} onClick={() => setTab(it.id)} style={{
+                background: "transparent", border: "none", padding: "10px 10px", fontSize: 13.5,
+                fontWeight: active ? 600 : 500, color: active ? "var(--text)" : "var(--muted)",
+                borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
+                cursor: "pointer", whiteSpace: "nowrap",
+              }}>{it.label}</button>
+            );
+          })}
+        </nav>
+      </div>
+    </header>
+  );
+}
+
+// ---------- shared bits ----------
+function Card({ children, style }) {
+  const cardStyle = React.useContext(CardStyleContext);
+  const look = CARD_STYLE_LOOKS[cardStyle] || CARD_STYLE_LOOKS.rounded;
+  return <div style={{ ...look, padding: 16, ...style }}>{children}</div>;
+}
+function Dot({ color, size = 8 }) {
+  return <span style={{ width: size, height: size, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />;
+}
+function SubjectMark({ subject, size = 8 }) {
+  if (!subject) return <Dot color="#666" size={size} />;
+  if (subject.photo) {
+    const px = size * 2.2;
+    return <img src={subject.photo} style={{ width: px, height: px, borderRadius: "50%", objectFit: "cover", flexShrink: 0, display: "inline-block", verticalAlign: "middle" }} />;
+  }
+  if (subject.icon) return <span style={{ fontSize: size * 1.8, lineHeight: 1, display: "inline-block" }}>{subject.icon}</span>;
+  return <Dot color={subject.color} size={size} />;
+}
+const SUBJECT_ICONS = ["📐", "📊", "🧪", "📚", "🌍", "💻", "🗣️", "✏️", "🔬", "📖", "🧮", "⚗️", "🧭", "📝", "⚛️", "🏛️"];
+const GOAL_ICONS = ["🎯", "📝", "🏁", "⭐", "🔥", "📅", "🚀", "🏆"];
+const WALLPAPER_PRESETS = [
+  { id: "none", label: "Sólido", value: null },
+  { id: "aurora", label: "Aurora", value: "linear-gradient(135deg, #1B2A2F 0%, #12161B 60%)" },
+  { id: "dusk", label: "Anoitecer", value: "linear-gradient(160deg, #2A2035 0%, #12161B 65%)" },
+  { id: "forest", label: "Floresta", value: "linear-gradient(160deg, #16281F 0%, #12161B 65%)" },
+  { id: "ember", label: "Brasa", value: "linear-gradient(160deg, #2E1E16 0%, #12161B 65%)" },
+];
+function EmptyRow({ text, action, onAction }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+      <span style={{ fontSize: 13.5, color: "var(--muted)" }}>{text}</span>
+      {action && <button onClick={onAction} style={ghostBtn}>{action}</button>}
+    </div>
+  );
+}
+
+// ---------- Painel ----------
+function Painel({ subjects, blocks, sessions, topics, setTopics, setTab, greeting }) {
+  const today = new Date().getDay();
+  const todaysBlocks = blocks.filter((b) => b.day === today);
+  const totalToday = sessions.filter((s) => new Date(s.endedAt).toDateString() === new Date().toDateString()).reduce((a, s) => a + s.seconds, 0);
+  const bySubject = useMemo(() => {
+    const map = {};
+    sessions.forEach((s) => { map[s.subjectId] = (map[s.subjectId] || 0) + s.seconds; });
+    return map;
+  }, [sessions]);
+  const totalAll = Object.values(bySubject).reduce((a, b) => a + b, 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        {greeting && <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>{greeting}</div>}
+        <div style={{ fontSize: 13, color: "var(--muted)" }}>{DAY_LABELS[today]}</div>
+        <div style={{ fontSize: 26, fontWeight: 700, marginTop: 2 }}>
+          {fmtDuration(totalToday)} <span style={{ fontSize: 14, fontWeight: 400, color: "var(--muted)" }}>estudados hoje</span>
+        </div>
+      </div>
+      <SuggestionCard subjects={subjects} topics={topics} blocks={blocks} setTopics={setTopics} setTab={setTab} />
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Plano de hoje</div>
+        {todaysBlocks.length === 0 ? (
+          <EmptyRow text="Nada planejado para hoje." action="Montar plano" onAction={() => setTab("materias")} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {todaysBlocks.map((b) => {
+              const subj = subjects.find((s) => s.id === b.subjectId);
+              return (
+                <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
+                  <SubjectMark subject={subj} />
+                  <span style={{ flex: 1 }}>{subj?.name || "Matéria removida"}</span>
+                  {b.label && <span style={{ color: "var(--muted)", fontSize: 12.5 }}>{b.label}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Tempo total por matéria</div>
+        {totalAll === 0 ? (
+          <EmptyRow text="Nenhuma sessão registrada ainda." action="Iniciar cronômetro" onAction={() => setTab("cronometro")} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {subjects.filter((s) => bySubject[s.id]).sort((a, b) => (bySubject[b.id] || 0) - (bySubject[a.id] || 0)).map((s) => {
+              const pct = Math.round(((bySubject[s.id] || 0) / totalAll) * 100);
+              return (
+                <div key={s.id}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}><SubjectMark subject={s} /> {s.name}</span>
+                    <span style={{ color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{fmtDuration(bySubject[s.id])}</span>
+                  </div>
+                  <div style={{ height: 6, background: "var(--surface2)", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ width: `${pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function SuggestionCard({ subjects, topics, blocks, setTopics, setTab }) {
+  const [seed, setSeed] = useState(0);
+  const pool = useMemo(() => buildSuggestionPool(subjects, topics, blocks), [subjects, topics, blocks]);
+
+  if (pool.length === 0) {
+    return (
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>💡 Sugestão de hoje</div>
+        <EmptyRow text="Adicione assuntos no Guia de Estudos para receber sugestões." action="Ir para o Guia" onAction={() => setTab("guia")} />
+      </Card>
+    );
+  }
+
+  const pick = pool[seed % pool.length];
+  const pct = subjectCompletionPct(pick.subject.id, topics);
+  const statusLabel = STATUS_META[pick.status].label;
+
+  function markEstudando() {
+    setTopics((prev) => prev.map((t) => {
+      if (t.subtopics && t.subtopics.length) {
+        return { ...t, subtopics: t.subtopics.map((st) => (st.name === pick.name ? { ...st, status: "estudando" } : st)) };
+      }
+      return t.name === pick.name && t.subjectId === pick.subject.id ? { ...t, status: "estudando" } : t;
+    }));
+  }
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>💡 Sugestão de hoje</div>
+      <div style={{ fontSize: 14, lineHeight: 1.5, marginBottom: 8 }}>
+        Gostaria de estudar <strong>{pick.name}</strong> hoje?{" "}
+        <span style={{ color: "var(--muted)" }}>
+          {pick.topicName ? `(dentro de ${pick.topicName}) ` : ""}{statusLabel}, <SubjectMark subject={pick.subject} size={7} /> {pick.subject.name} está {pct}% completa.
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={markEstudando} style={primaryBtn}>Marcar como estudando</button>
+        <button onClick={() => setTab("cronometro")} style={ghostBtn}>Ir pro cronômetro</button>
+        <button onClick={() => setSeed((s) => s + 1)} style={ghostBtn}>Outra sugestão</button>
+      </div>
+    </Card>
+  );
+}
+
+// ---------- Sincronização entre aparelhos (P2P via PeerJS) ----------
+function SyncPanel(props) {
+  const {
+    subjects, setSubjects, blocks, setBlocks, sessions, setSessions, questions, setQuestions,
+    goals, setGoals, topics, setTopics, wallpaper, setWallpaper, accent, setAccent,
+    appName, setAppName, greeting, setGreeting, font, setFont, timerSound, setTimerSound,
+    celebrationEmoji, setCelebrationEmoji, cardStyle, setCardStyle,
+  } = props;
+
+  const [mode, setMode] = useState(null); // null | "host" | "join"
+  const [code, setCode] = useState("");
+  const [inputCode, setInputCode] = useState("");
+  const [status, setStatus] = useState("");
+  const [resultMsg, setResultMsg] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [libError, setLibError] = useState("");
+
+  const peerRef = useRef(null);
+  const connRef = useRef(null);
+  const qrRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const timeoutRef = useRef(null);
+  const syncedRef = useRef(false);
+
+  const dataRef = useRef();
+  dataRef.current = {
+    subjects, blocks, sessions, questions, goals, topics,
+    wallpaper, accent, appName, greeting, font, timerSound, celebrationEmoji, cardStyle,
+  };
+
+  function cleanupPeer() {
+    clearTimeout(timeoutRef.current);
+    try { connRef.current && connRef.current.close(); } catch (e) {}
+    try { peerRef.current && peerRef.current.destroy(); } catch (e) {}
+    peerRef.current = null;
+    connRef.current = null;
+  }
+  function stopScan() {
+    setScanning(false);
+    cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+  }
+  function reset() {
+    cleanupPeer();
+    stopScan();
+    setMode(null); setCode(""); setInputCode(""); setStatus(""); setResultMsg("");
+  }
+
+  useEffect(() => () => { cleanupPeer(); stopScan(); }, []);
+
+  useEffect(() => {
+    if (mode === "host" && code && qrRef.current) {
+      if (window.QRCode) {
+        qrRef.current.innerHTML = "";
+        new window.QRCode(qrRef.current, { text: code, width: 150, height: 150 });
+      }
+    }
+  }, [mode, code]);
+
+  function applyMerge(remote) {
+    if (!remote || typeof remote !== "object") return;
+    const local = dataRef.current;
+    const idMap = {};
+    const mergedSubjects = [...local.subjects];
+    (remote.subjects || []).forEach((rs) => {
+      const match = mergedSubjects.find((ls) => ls.name.trim().toLowerCase() === String(rs.name || "").trim().toLowerCase());
+      if (match) {
+        idMap[rs.id] = match.id;
+      } else {
+        const ns = { ...rs, id: uid() };
+        idMap[rs.id] = ns.id;
+        mergedSubjects.push(ns);
+      }
+    });
+    function remap(localArr, remoteArr, subjField) {
+      const existing = new Set(localArr.map((x) => x.id));
+      const added = (remoteArr || []).map((r) => {
+        const newId = existing.has(r.id) ? uid() : r.id;
+        existing.add(newId);
+        const patched = { ...r, id: newId };
+        if (subjField && patched[subjField]) patched[subjField] = idMap[patched[subjField]] || patched[subjField];
+        return patched;
+      });
+      return [...localArr, ...added];
+    }
+    const remoteTopicsFixed = (remote.topics || []).map((t) => ({ ...t, subtopics: (t.subtopics || []).map((st) => ({ ...st, id: uid() })) }));
+
+    const mergedBlocks = remap(local.blocks, remote.blocks, "subjectId");
+    const mergedSessions = remap(local.sessions, remote.sessions, "subjectId");
+    const mergedQuestions = remap(local.questions, remote.questions, "subjectId");
+    const mergedGoals = remap(local.goals, remote.goals, null);
+    const mergedTopics = remap(local.topics, remoteTopicsFixed, "subjectId");
+
+    setSubjects(mergedSubjects);
+    setBlocks(mergedBlocks);
+    setSessions(mergedSessions);
+    setQuestions(mergedQuestions);
+    setGoals(mergedGoals);
+    setTopics(mergedTopics);
+
+    // personalização: o objetivo aqui é "levar tudo", inclusive papel de parede — aplica o que veio do outro lado
+    if (remote.wallpaper !== undefined) setWallpaper(remote.wallpaper);
+    if (remote.accent) setAccent(remote.accent);
+    if (remote.appName) setAppName(remote.appName);
+    if (typeof remote.greeting === "string") setGreeting(remote.greeting);
+    if (remote.font) setFont(remote.font);
+    if (typeof remote.timerSound === "boolean") setTimerSound(remote.timerSound);
+    if (remote.celebrationEmoji) setCelebrationEmoji(remote.celebrationEmoji);
+    if (remote.cardStyle) setCardStyle(remote.cardStyle);
+
+    setResultMsg(`Sincronizado! Agora: ${mergedSubjects.length} matérias, ${mergedSessions.length} sessões, ${mergedTopics.length} assuntos.`);
+    syncedRef.current = true;
+    clearTimeout(timeoutRef.current);
+  }
+
+  function setupConnection(conn) {
+    connRef.current = conn;
+    conn.on("open", () => {
+      setStatus("Conectado! Trocando dados...");
+      conn.send({ type: "estudos-sync", payload: dataRef.current });
+    });
+    conn.on("data", (msg) => {
+      if (msg && msg.type === "estudos-sync") {
+        applyMerge(msg.payload);
+        setStatus("");
+      }
+    });
+    conn.on("close", () => { if (!syncedRef.current) setStatus("Conexão encerrada antes de sincronizar. Tente de novo."); });
+    conn.on("error", () => setStatus("Erro na conexão. Tente novamente."));
+  }
+
+  function checkLib() {
+    if (!window.Peer) {
+      setLibError("Não consegui carregar a biblioteca de sincronização (sem internet ou serviço fora do ar). Use o backup manual por enquanto.");
+      return false;
+    }
+    return true;
+  }
+
+  function startHost() {
+    if (!checkLib()) return;
+    setMode("host");
+    setStatus("Gerando código...");
+    syncedRef.current = false;
+    const shortCode = genSyncCode();
+    const peer = new window.Peer("estudos-sync-" + shortCode, { debug: 0 });
+    peerRef.current = peer;
+    peer.on("open", () => {
+      setCode(shortCode);
+      setStatus("Aguardando o outro aparelho conectar...");
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => {
+        if (!syncedRef.current) setStatus("Ninguém conectou ainda. O código continua valendo — pode tentar de novo no outro aparelho.");
+      }, 5 * 60 * 1000);
+    });
+    peer.on("connection", (conn) => setupConnection(conn));
+    peer.on("error", (err) => setStatus("Erro: " + (err && err.type ? err.type : "não foi possível conectar")));
+  }
+
+  function startJoin() {
+    if (!checkLib()) return;
+    setMode("join");
+  }
+
+  function connectWithCode() {
+    const clean = inputCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (clean.length < 4) return;
+    setStatus("Conectando...");
+    syncedRef.current = false;
+    const peer = new window.Peer(undefined, { debug: 0 });
+    peerRef.current = peer;
+    peer.on("open", () => {
+      const conn = peer.connect("estudos-sync-" + clean, { reliable: true });
+      setupConnection(conn);
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => {
+        if (!syncedRef.current) setStatus("Não consegui conectar. Confira o código e se o outro aparelho está com a tela de código aberta.");
+      }, 15000);
+    });
+    peer.on("error", (err) => setStatus("Erro: " + (err && err.type ? err.type : "não foi possível conectar")));
+  }
+
+  async function startScan() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+      setScanning(true);
+      rafRef.current = requestAnimationFrame(scanTick);
+    } catch (e) {
+      setStatus("Não consegui acessar a câmera — digite o código manualmente.");
+    }
+  }
+  function scanTick() {
+    if (!streamRef.current || !videoRef.current || !window.jsQR) return;
+    const video = videoRef.current;
+    if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const result = window.jsQR(imgData.data, imgData.width, imgData.height);
+      if (result && result.data) {
+        setInputCode(result.data.toUpperCase());
+        stopScan();
+        return;
+      }
+    }
+    rafRef.current = requestAnimationFrame(scanTick);
+  }
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Sincronizar com outro aparelho</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+        Conecta os dois aparelhos direto (sem passar pelos nossos servidores) e combina matérias, plano, sessões,
+        questões, metas, guia de estudos e até papel de parede/personalização dos dois lados. Precisa de internet
+        nos dois pra estabelecer a conexão inicial (usa um serviço público gratuito de sinalização).
+      </div>
+      {libError && <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: 10 }}>{libError}</div>}
+
+      {!mode && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={startHost} style={primaryBtn}>Gerar código (este aparelho)</button>
+          <button onClick={startJoin} style={ghostBtn}>Tenho um código</button>
+        </div>
+      )}
+
+      {mode === "host" && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginTop: 6 }}>
+          {code ? (
+            <React.Fragment>
+              <div ref={qrRef} style={{ background: "#fff", padding: 8, borderRadius: 8 }} />
+              <div style={{ fontSize: 26, fontWeight: 700, letterSpacing: 4, fontFamily: "'JetBrains Mono', monospace" }}>{code}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center" }}>Digite esse código no outro aparelho, ou escaneie o QR.</div>
+            </React.Fragment>
+          ) : (
+            <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Gerando...</div>
+          )}
+          {status && <div style={{ fontSize: 12.5, color: "var(--accent2)" }}>{status}</div>}
+          {resultMsg && <div style={{ fontSize: 12.5, color: "var(--ok)", textAlign: "center" }}>{resultMsg}</div>}
+          <button onClick={reset} style={ghostBtn}>{resultMsg ? "Fechar" : "Cancelar"}</button>
+        </div>
+      )}
+
+      {mode === "join" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 6, alignItems: "center" }}>
+          <input value={inputCode} onChange={(e) => setInputCode(e.target.value.toUpperCase())} placeholder="Código (ex: 7XQ2K9)"
+            style={{ ...input, textAlign: "center", fontSize: 20, letterSpacing: 3, fontFamily: "'JetBrains Mono', monospace", width: "100%", maxWidth: 220 }} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+            <button onClick={connectWithCode} style={primaryBtn} disabled={inputCode.trim().length < 4}>Conectar</button>
+            {!scanning ? (
+              <button onClick={startScan} style={ghostBtn}>📷 Escanear QR</button>
+            ) : (
+              <button onClick={stopScan} style={ghostBtn}>Parar câmera</button>
+            )}
+          </div>
+          {scanning && <video ref={videoRef} muted playsInline style={{ width: "100%", maxWidth: 260, borderRadius: 8 }} />}
+          {status && <div style={{ fontSize: 12.5, color: "var(--accent2)" }}>{status}</div>}
+          {resultMsg && <div style={{ fontSize: 12.5, color: "var(--ok)", textAlign: "center" }}>{resultMsg}</div>}
+          <button onClick={reset} style={ghostBtn}>{resultMsg ? "Fechar" : "Cancelar"}</button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function Materias({
+  subjects, setSubjects, blocks, setBlocks, sessions, setSessions, questions, setQuestions, goals, setGoals, topics, setTopics,
+  accent, setAccent, wallpaper, setWallpaper, onWipe, onExport, onImport, autoBackup, setAutoBackup,
+  appName, setAppName, greeting, setGreeting, font, setFont, timerSound, setTimerSound, celebrationEmoji, setCelebrationEmoji,
+  cardStyle, setCardStyle,
+}) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState(PALETTE[0]);
+  const [icon, setIcon] = useState(null);
+  const [photo, setPhoto] = useState(null);
+  const [photoError, setPhotoError] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [dayPick, setDayPick] = useState(1);
+  const [subjPick, setSubjPick] = useState(subjects[0]?.id || "");
+  const [label, setLabel] = useState("");
+  const [durationMin, setDurationMin] = useState(60);
+  const [confirmWipe, setConfirmWipe] = useState(false);
+  const [wallpaperError, setWallpaperError] = useState("");
+  const [importMsg, setImportMsg] = useState("");
+
+  useEffect(() => { if (!subjPick && subjects[0]) setSubjPick(subjects[0].id); }, [subjects]);
+
+  function addSubject() {
+    if (!name.trim()) return;
+    setSubjects((prev) => [...prev, { id: uid(), name: name.trim(), color, icon, photo }]);
+    setName(""); setIcon(null); setPhoto(null); setColor(PALETTE[Math.floor(Math.random() * PALETTE.length)]);
+  }
+  function readImageAsDataURL(file, onDone, onError) {
+    if (file.size > 900 * 1024) {
+      onError("Imagem muito grande — use uma foto com até 900KB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => onDone(reader.result);
+    reader.onerror = () => onError("Não consegui ler essa imagem.");
+    reader.readAsDataURL(file);
+  }
+  function handleNewSubjectPhoto(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setPhotoError("");
+    readImageAsDataURL(file, (dataUrl) => setPhoto(dataUrl), setPhotoError);
+    e.target.value = "";
+  }
+  function handleExistingSubjectPhoto(id, e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setPhotoError("");
+    readImageAsDataURL(file, (dataUrl) => updateSubject(id, { photo: dataUrl }), setPhotoError);
+    e.target.value = "";
+  }
+  function removeSubject(id) {
+    setSubjects((prev) => prev.filter((s) => s.id !== id));
+    setBlocks((prev) => prev.filter((b) => b.subjectId !== id));
+    if (editingId === id) setEditingId(null);
+  }
+  function updateSubject(id, patch) {
+    setSubjects((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }
+  function moveSubject(id, dir) {
+    setSubjects((prev) => {
+      const idx = prev.findIndex((s) => s.id === id);
+      const newIdx = idx + dir;
+      if (idx === -1 || newIdx < 0 || newIdx >= prev.length) return prev;
+      const copy = [...prev];
+      [copy[idx], copy[newIdx]] = [copy[newIdx], copy[idx]];
+      return copy;
+    });
+  }
+  function addBlock() {
+    if (!subjPick) return;
+    setBlocks((prev) => [...prev, { id: uid(), day: dayPick, subjectId: subjPick, label: label.trim(), durationMin }]);
+    setLabel("");
+  }
+  function removeBlock(id) { setBlocks((prev) => prev.filter((b) => b.id !== id)); }
+
+  async function handleWallpaperFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 2.5 * 1024 * 1024) {
+      setWallpaperError("Imagem muito grande — escolha uma com até 2,5MB.");
+      e.target.value = "";
+      return;
+    }
+    setWallpaperError("");
+    const reader = new FileReader();
+    reader.onload = () => setWallpaper({ type: "image", value: reader.result });
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
+
+  async function handleImportFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      await onImport(file);
+      setImportMsg("Backup importado com sucesso.");
+    } catch (err) {
+      setImportMsg("Não consegui ler esse arquivo de backup.");
+    }
+    e.target.value = "";
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Matérias</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+          {subjects.map((s, idx) => (
+            <div key={s.id}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
+                <button onClick={() => setEditingId(editingId === s.id ? null : s.id)} style={{ background: "transparent", border: "none", cursor: "pointer", minHeight: "auto", padding: 2, display: "flex" }} aria-label="Editar ícone e cor">
+                  <SubjectMark subject={s} size={11} />
+                </button>
+                <span style={{ flex: 1 }}>{s.name}</span>
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  <button onClick={() => moveSubject(s.id, -1)} disabled={idx === 0} style={{ ...iconBtn, fontSize: 11, opacity: idx === 0 ? 0.3 : 1, padding: 0, lineHeight: 1 }} aria-label="Mover para cima">▲</button>
+                  <button onClick={() => moveSubject(s.id, 1)} disabled={idx === subjects.length - 1} style={{ ...iconBtn, fontSize: 11, opacity: idx === subjects.length - 1 ? 0.3 : 1, padding: 0, lineHeight: 1 }} aria-label="Mover para baixo">▼</button>
+                </div>
+                <button onClick={() => removeSubject(s.id)} style={iconBtn} aria-label={`Remover ${s.name}`}>×</button>
+              </div>
+              {editingId === s.id && (
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, padding: 10, marginTop: 6, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <label style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+                      📷 {s.photo ? "trocar foto" : "usar foto"}
+                      <input type="file" accept="image/*" onChange={(e) => handleExistingSubjectPhoto(s.id, e)} style={{ display: "none" }} />
+                    </label>
+                    {s.photo && <button onClick={() => updateSubject(s.id, { photo: null })} style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11 }}>remover foto</button>}
+                    {!s.photo && <button onClick={() => updateSubject(s.id, { icon: null })} style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11 }}>sem ícone</button>}
+                  </div>
+                  {!s.photo && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                      {SUBJECT_ICONS.map((ic) => (
+                        <button key={ic} onClick={() => updateSubject(s.id, { icon: ic })} style={{ fontSize: 17, background: s.icon === ic ? "var(--surface)" : "transparent", border: `1px solid ${s.icon === ic ? "var(--accent)" : "var(--line)"}`, borderRadius: 6, padding: "2px 5px", cursor: "pointer", minHeight: "auto" }}>{ic}</button>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    {PALETTE.map((c) => (
+                      <button key={c} onClick={() => updateSubject(s.id, { color: c })} style={{ width: 22, height: 22, minHeight: 22, borderRadius: "50%", background: c, border: s.color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+                    ))}
+                    <input type="color" value={s.color} onChange={(e) => updateSubject(s.id, { color: e.target.value })} title="Cor personalizada" style={{ width: 24, height: 24, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+                    <button onClick={() => setEditingId(null)} style={{ ...primaryBtn, marginLeft: "auto", padding: "6px 10px", fontSize: 12 }}>Concluído</button>
+                  </div>
+                  {photoError && <div style={{ fontSize: 11, color: "var(--danger)" }}>{photoError}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+          {subjects.length === 0 && <span style={{ fontSize: 13, color: "var(--muted)" }}>Nenhuma matéria ainda.</span>}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+          {photo && <img src={photo} style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }} />}
+          <label style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+            📷 {photo ? "trocar foto" : "usar foto"}
+            <input type="file" accept="image/*" onChange={handleNewSubjectPhoto} style={{ display: "none" }} />
+          </label>
+          {photo ? (
+            <button onClick={() => setPhoto(null)} style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11 }}>remover foto</button>
+          ) : (
+            <button onClick={() => setIcon(null)} style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11 }}>sem ícone</button>
+          )}
+          {!photo && SUBJECT_ICONS.map((ic) => (
+            <button key={ic} onClick={() => setIcon(ic)} style={{ fontSize: 17, background: icon === ic ? "var(--surface2)" : "transparent", border: `1px solid ${icon === ic ? "var(--accent)" : "var(--line)"}`, borderRadius: 6, padding: "2px 5px", cursor: "pointer", minHeight: "auto" }}>{ic}</button>
+          ))}
+        </div>
+        {photoError && <div style={{ fontSize: 11, color: "var(--danger)", marginBottom: 8 }}>{photoError}</div>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nova matéria" onKeyDown={(e) => e.key === "Enter" && addSubject()} style={{ ...input, flex: 1, minWidth: 140 }} />
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            {PALETTE.slice(0, 6).map((c) => (
+              <button key={c} onClick={() => setColor(c)} aria-label={`Cor ${c}`} style={{ width: 24, height: 24, minHeight: 24, borderRadius: "50%", background: c, border: color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+            ))}
+            <input type="color" value={color} onChange={(e) => setColor(e.target.value)} title="Cor personalizada" style={{ width: 24, height: 24, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+          </div>
+          <button onClick={addSubject} style={primaryBtn}>Adicionar</button>
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Plano semanal</div>
+        <WeekGrid blocks={blocks} subjects={subjects} onRemove={removeBlock} />
+        {subjects.length > 0 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
+            <select value={dayPick} onChange={(e) => setDayPick(Number(e.target.value))} style={input}>
+              {DAY_LABELS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+            </select>
+            <select value={subjPick} onChange={(e) => setSubjPick(e.target.value)} style={input}>
+              {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="ex: 19h-20h" style={{ ...input, width: 100 }} />
+            <input type="number" min={10} step={10} value={durationMin} onChange={(e) => setDurationMin(Number(e.target.value) || 60)} title="Duração em minutos" style={{ ...input, width: 74 }} />
+            <span style={{ fontSize: 12, color: "var(--muted)", alignSelf: "center" }}>min</span>
+            <button onClick={addBlock} style={primaryBtn}>Adicionar ao plano</button>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Tema</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+          <span style={{ fontSize: 13, color: "var(--muted)" }}>Cor de destaque</span>
+          {PALETTE.map((c) => (
+            <button key={c} onClick={() => setAccent(c)} aria-label={`Destaque ${c}`} style={{ width: 26, height: 26, minHeight: 26, borderRadius: "50%", background: c, border: accent === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+          ))}
+          <input type="color" value={accent} onChange={(e) => setAccent(e.target.value)} title="Cor personalizada" style={{ width: 28, height: 28, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+        </div>
+
+        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 8 }}>Papel de parede</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          {WALLPAPER_PRESETS.map((p) => {
+            const active = (!wallpaper && p.id === "none") || (wallpaper?.type === "gradient" && wallpaper.value === p.value);
+            return (
+              <button key={p.id} onClick={() => setWallpaper(p.value ? { type: "gradient", value: p.value } : null)} style={{
+                width: 52, height: 40, borderRadius: 8, border: active ? "2px solid var(--accent)" : "1px solid var(--line)",
+                background: p.value || "var(--surface2)", cursor: "pointer", position: "relative", overflow: "hidden",
+              }} aria-label={p.label} title={p.label} />
+            );
+          })}
+          <label style={{
+            width: 52, height: 40, borderRadius: 8, border: wallpaper?.type === "image" ? "2px solid var(--accent)" : "1px dashed var(--line)",
+            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontSize: 16, background: "var(--surface2)",
+          }} title="Subir imagem personalizada">
+            📷
+            <input type="file" accept="image/*" onChange={handleWallpaperFile} style={{ display: "none" }} />
+          </label>
+        </div>
+        {wallpaperError && <div style={{ fontSize: 12, color: "var(--danger)" }}>{wallpaperError}</div>}
+        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Escolha um degradê pronto ou suba uma foto sua (até 2,5MB) como fundo do app.</div>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Personalização</div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Nome do app</div>
+          <input value={appName} onChange={(e) => setAppName(e.target.value.slice(0, 24))} placeholder="Estudos" style={{ ...input, width: "100%" }} />
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Mensagem no painel (opcional)</div>
+          <input value={greeting} onChange={(e) => setGreeting(e.target.value.slice(0, 60))} placeholder="Ex: Bora, futuro fuzileiro! 🚀" style={{ ...input, width: "100%" }} />
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Fonte</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {Object.entries(FONT_OPTIONS).map(([key, opt]) => (
+              <button key={key} onClick={() => setFont(key)} style={{
+                ...ghostBtn, padding: "6px 12px", fontSize: 13, fontFamily: opt.family,
+                background: font === key ? "var(--surface2)" : "transparent",
+                borderColor: font === key ? "var(--accent)" : "var(--line)",
+              }}>{opt.label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Emoji de comemoração (banco de questões)</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {CELEBRATION_EMOJIS.map((em) => (
+              <button key={em} onClick={() => setCelebrationEmoji(em)} style={{
+                fontSize: 18, padding: "4px 8px", borderRadius: 6, cursor: "pointer", minHeight: "auto",
+                background: celebrationEmoji === em ? "var(--surface2)" : "transparent",
+                border: `1px solid ${celebrationEmoji === em ? "var(--accent)" : "var(--line)"}`,
+              }}>{em}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Estilo dos cartões (painel, sugestões, etc.)</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {CARD_STYLE_OPTIONS.map((opt) => (
+              <button key={opt.id} onClick={() => setCardStyle(opt.id)} style={{
+                ...ghostBtn, padding: "6px 12px", fontSize: 12.5,
+                background: cardStyle === opt.id ? "var(--surface2)" : "transparent",
+                borderColor: cardStyle === opt.id ? "var(--accent)" : "var(--line)",
+              }}>{opt.label}</button>
+            ))}
+          </div>
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={timerSound} onChange={(e) => setTimerSound(e.target.checked)} style={{ width: 16, height: 16, minHeight: "auto", cursor: "pointer" }} />
+          <span style={{ fontSize: 13 }}>Tocar som ao terminar o cronômetro</span>
+        </label>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Backup manual</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+          A sincronização automática pode falhar dependendo de onde o app está aberto. Para garantir que você não
+          perde nada, exporte um arquivo de backup e importe no outro aparelho (celular ↔ PC).
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={onExport} style={primaryBtn}>Exportar backup</button>
+          <label style={{ ...ghostBtn, display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+            Importar backup
+            <input type="file" accept=".json" onChange={handleImportFile} style={{ display: "none" }} />
+          </label>
+        </div>
+        {importMsg && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>{importMsg}</div>}
+
+        <div style={{ borderTop: "1px solid var(--line)", marginTop: 14, paddingTop: 14 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6 }}>
+            <input type="checkbox" checked={autoBackup} onChange={(e) => setAutoBackup(e.target.checked)} style={{ width: 16, height: 16, minHeight: "auto", cursor: "pointer" }} />
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Backup automático (a cada 10min, se houver mudanças)</span>
+          </label>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            Baixa um arquivo extra sozinho enquanto o app fica aberto — não substitui o backup manual acima.
+            Dependendo do navegador, ele pode pedir permissão pra downloads automáticos na primeira vez.
+          </div>
+        </div>
+      </Card>
+
+      <SyncPanel
+        subjects={subjects} setSubjects={setSubjects} blocks={blocks} setBlocks={setBlocks}
+        sessions={sessions} setSessions={setSessions} questions={questions} setQuestions={setQuestions}
+        goals={goals} setGoals={setGoals} topics={topics} setTopics={setTopics}
+        wallpaper={wallpaper} setWallpaper={setWallpaper} accent={accent} setAccent={setAccent}
+        appName={appName} setAppName={setAppName} greeting={greeting} setGreeting={setGreeting}
+        font={font} setFont={setFont} timerSound={timerSound} setTimerSound={setTimerSound}
+        celebrationEmoji={celebrationEmoji} setCelebrationEmoji={setCelebrationEmoji}
+        cardStyle={cardStyle} setCardStyle={setCardStyle}
+      />
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: "var(--danger)" }}>Zona de risco</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+          Apaga matérias, plano, sessões e banco de questões deste dispositivo/conta. Não pode ser desfeito.
+        </div>
+        {!confirmWipe ? (
+          <button onClick={() => setConfirmWipe(true)} style={{ ...ghostBtn, borderColor: "var(--danger)", color: "var(--danger)" }}>Apagar todos os dados</button>
+        ) : (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => { onWipe(); setConfirmWipe(false); }} style={{ ...primaryBtn, background: "var(--danger)", color: "#fff" }}>Confirmar exclusão</button>
+            <button onClick={() => setConfirmWipe(false)} style={ghostBtn}>Cancelar</button>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function WeekGrid({ blocks, subjects, onRemove }) {
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(56px, 1fr))", gap: 6, minWidth: 460 }}>
+        {DAYS.map((d, i) => {
+          const dayBlocks = blocks.filter((b) => b.day === i);
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", marginBottom: 2 }}>{d}</div>
+              <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, minHeight: 60, padding: 4, display: "flex", flexDirection: "column", gap: 3 }}>
+                {dayBlocks.map((b) => {
+                  const subj = subjects.find((s) => s.id === b.subjectId);
+                  return (
+                    <button key={b.id} onClick={() => onRemove(b.id)} title="Clique para remover" style={{
+                      background: (subj?.color || "#666") + "26", border: `1px solid ${subj?.color || "#666"}`, color: "var(--text)",
+                      borderRadius: 4, fontSize: 9.5, padding: "2px 3px", minHeight: "auto", cursor: "pointer", textAlign: "left", lineHeight: 1.2,
+                    }}>{subj?.name || "—"}{b.label ? ` · ${b.label}` : ""} · {fmtDuration((b.durationMin || 60) * 60)}</button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Calendário & Metas ----------
+function Calendario({ subjects, blocks, sessions, goals, setGoals }) {
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [title, setTitle] = useState("");
+  const [targetDate, setTargetDate] = useState("");
+  const [goalIcon, setGoalIcon] = useState("🎯");
+  const [goalColor, setGoalColor] = useState("#E8A33D");
+
+  const now = new Date();
+  const viewDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+  const year = viewDate.getFullYear();
+  const month = viewDate.getMonth();
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthLabel = viewDate.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  const todayStr = now.toDateString();
+
+  function addGoal() {
+    if (!title.trim() || !targetDate) return;
+    setGoals((prev) => [...prev, { id: uid(), title: title.trim(), targetDate, icon: goalIcon, color: goalColor }]);
+    setTitle(""); setTargetDate("");
+  }
+  function removeGoal(id) { setGoals((prev) => prev.filter((g) => g.id !== id)); }
+
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const sortedGoals = [...goals].sort((a, b) => a.targetDate.localeCompare(b.targetDate));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <button onClick={() => setMonthOffset((m) => m - 1)} style={{ ...iconBtn, fontSize: 20 }} aria-label="Mês anterior">‹</button>
+          <div style={{ fontSize: 13.5, fontWeight: 600, textTransform: "capitalize" }}>{monthLabel}</div>
+          <button onClick={() => setMonthOffset((m) => m + 1)} style={{ ...iconBtn, fontSize: 20 }} aria-label="Próximo mês">›</button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, marginBottom: 4 }}>
+          {DAYS.map((d) => <div key={d} style={{ fontSize: 10, color: "var(--muted)", textAlign: "center" }}>{d}</div>)}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
+          {cells.map((d, i) => {
+            if (d === null) return <div key={i} />;
+            const cellDate = new Date(year, month, d);
+            const dayBlocks = blocks.filter((b) => b.day === cellDate.getDay());
+            const isToday = cellDate.toDateString() === todayStr;
+            const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+            const goalHere = goals.find((g) => g.targetDate === dateStr);
+            return (
+              <div key={i} title={goalHere ? goalHere.title : ""} style={{
+                minHeight: 40, borderRadius: 6, padding: 2,
+                background: goalHere ? `${goalHere.color || "#E8A33D"}22` : "var(--surface2)",
+                border: isToday ? "1.5px solid var(--accent)" : goalHere ? `1px solid ${goalHere.color || "#E8A33D"}` : "1px solid var(--line)",
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
+              }}>
+                <span style={{ fontSize: 10.5, color: isToday ? "var(--accent)" : "var(--text)", fontWeight: isToday ? 700 : 500 }}>{d}</span>
+                <div style={{ display: "flex", gap: 1.5, flexWrap: "wrap", justifyContent: "center", minHeight: 5 }}>
+                  {dayBlocks.slice(0, 4).map((b) => {
+                    const subj = subjects.find((s) => s.id === b.subjectId);
+                    return <Dot key={b.id} color={subj?.color || "#666"} size={4.5} />;
+                  })}
+                  {goalHere && <span style={{ fontSize: 8 }}>{goalHere.icon || "🎯"}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Metas</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+          {sortedGoals.length === 0 && <span style={{ fontSize: 13, color: "var(--muted)" }}>Nenhuma meta ainda — adicione a data da sua prova abaixo.</span>}
+          {sortedGoals.map((g) => (
+            <GoalCard key={g.id} goal={g} blocks={blocks} sessions={sessions} onRemove={() => removeGoal(g.id)} />
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+          {GOAL_ICONS.map((ic) => (
+            <button key={ic} onClick={() => setGoalIcon(ic)} style={{ fontSize: 16, background: goalIcon === ic ? "var(--surface2)" : "transparent", border: `1px solid ${goalIcon === ic ? "var(--accent)" : "var(--line)"}`, borderRadius: 6, padding: "2px 5px", cursor: "pointer", minHeight: "auto" }}>{ic}</button>
+          ))}
+          {PALETTE.map((c) => (
+            <button key={c} onClick={() => setGoalColor(c)} aria-label={`Cor da meta ${c}`} style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: goalColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+          ))}
+          <input type="color" value={goalColor} onChange={(e) => setGoalColor(e.target.value)} title="Cor personalizada" style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Prova ITA" style={{ ...input, flex: 1, minWidth: 120 }} />
+          <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} style={input} />
+          <button onClick={addGoal} style={primaryBtn} disabled={!title.trim() || !targetDate}>Adicionar meta</button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function GoalCard({ goal, blocks, sessions, onRemove }) {
+  const days = daysUntil(goal.targetDate);
+  const dateLabel = new Date(goal.targetDate + "T00:00:00").toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" });
+
+  if (days < 0) {
+    return (
+      <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 12, fontSize: 12.5 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <strong style={{ fontSize: 13.5 }}>{goal.icon || "🎯"} {goal.title}</strong>
+          <button onClick={onRemove} style={iconBtn} aria-label="Remover meta">×</button>
+        </div>
+        <div style={{ color: "var(--muted)", marginTop: 2, textTransform: "capitalize" }}>{dateLabel} · já passou</div>
+      </div>
+    );
+  }
+
+  const weeklyHours = weeklyPlannedHours(blocks);
+  const soFar = totalStudiedHours(sessions);
+  const plannedRemaining = weeklyHours * (days / 7);
+  const plannedTotal = soFar + plannedRemaining;
+  const pace = recentDailyPaceHours(sessions, 14);
+  const actualRemaining = pace !== null ? pace * days : null;
+  const actualTotal = pace !== null ? soFar + actualRemaining : null;
+
+  return (
+    <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 12, fontSize: 12.5, display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong style={{ fontSize: 13.5 }}>{goal.icon || "🎯"} {goal.title}</strong>
+        <button onClick={onRemove} style={iconBtn} aria-label="Remover meta">×</button>
+      </div>
+      <div style={{ color: "var(--muted)", textTransform: "capitalize" }}>
+        {dateLabel} · {days === 0 ? "é hoje" : `faltam ${days} dia${days === 1 ? "" : "s"}`}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 2 }}>
+        <div>
+          <span style={{ color: "var(--muted)" }}>Seguindo o plano ({weeklyHours.toFixed(1)}h/semana): </span>
+          <strong style={{ color: "var(--accent2)" }}>+{plannedRemaining.toFixed(0)}h</strong>
+          <span style={{ color: "var(--muted)" }}> até lá (total ≈ {plannedTotal.toFixed(0)}h)</span>
+        </div>
+        {pace !== null ? (
+          <div>
+            <span style={{ color: "var(--muted)" }}>No seu ritmo real (últimos 14 dias): </span>
+            <strong style={{ color: pace * 7 >= weeklyHours ? "var(--ok)" : "var(--danger)" }}>+{actualRemaining.toFixed(0)}h</strong>
+            <span style={{ color: "var(--muted)" }}> até lá (total ≈ {actualTotal.toFixed(0)}h)</span>
+          </div>
+        ) : (
+          <div style={{ color: "var(--muted)" }}>Registre sessões no cronômetro para ver a projeção no seu ritmo real.</div>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--muted)" }}>Estimativa aproximada — você pode estudar mais ou menos do que o planejado.</div>
+    </div>
+  );
+}
+
+// ---------- Guia de Estudos ----------
+const GUIDE_JSON_EXAMPLE = `{
+  "materias": [
+    {
+      "nome": "Matemática",
+      "assuntos": [
+        {
+          "nome": "Trigonometria",
+          "subtopicos": ["Trigonometria espacial", "Lei dos senos", "Lei dos cossenos"]
+        },
+        { "nome": "Geometria analítica", "subtopicos": ["Retas", "Circunferência"] }
+      ]
+    },
+    { "nome": "Física", "assuntos": [{ "nome": "Cinemática", "subtopicos": ["MRU", "MRUV"] }] }
+  ]
+}`;
+
+function StatusPill({ status, onClick }) {
+  const meta = STATUS_META[status] || STATUS_META.nao_estudado;
+  return (
+    <button onClick={onClick} title="Clique para mudar o status" style={{
+      display: "inline-flex", alignItems: "center", gap: 5, background: `${meta.color}22`, border: `1px solid ${meta.color}`,
+      color: meta.color, borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 600, cursor: "pointer", minHeight: "auto",
+    }}>
+      <Dot color={meta.color} size={6} /> {meta.label}
+    </button>
+  );
+}
+
+function GuiaEstudos({ subjects, setSubjects, topics, setTopics }) {
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
+  const [topicName, setTopicName] = useState("");
+  const [subtopicInputs, setSubtopicInputs] = useState({});
+  const [pasteText, setPasteText] = useState("");
+  const [importMsg, setImportMsg] = useState("");
+  const [showFormat, setShowFormat] = useState(false);
+  const [collapsed, setCollapsed] = useState({});
+
+  function toggleCollapsed(id) { setCollapsed((prev) => ({ ...prev, [id]: !prev[id] })); }
+
+  useEffect(() => { if (!subjectId && subjects[0]) setSubjectId(subjects[0].id); }, [subjects]);
+
+  function addTopic() {
+    if (!subjectId || !topicName.trim()) return;
+    setTopics((prev) => [...prev, { id: uid(), subjectId, name: topicName.trim(), status: "nao_estudado", subtopics: [] }]);
+    setTopicName("");
+  }
+  function removeTopic(id) { setTopics((prev) => prev.filter((t) => t.id !== id)); }
+  function cycleTopicStatus(id) {
+    setTopics((prev) => prev.map((t) => (t.id === id ? { ...t, status: nextStatus(t.status) } : t)));
+  }
+  function addSubtopic(topicId) {
+    const name = (subtopicInputs[topicId] || "").trim();
+    if (!name) return;
+    setTopics((prev) => prev.map((t) => (t.id === topicId ? { ...t, subtopics: [...t.subtopics, { id: uid(), name, status: "nao_estudado" }] } : t)));
+    setSubtopicInputs((prev) => ({ ...prev, [topicId]: "" }));
+  }
+  function removeSubtopic(topicId, subId) {
+    setTopics((prev) => prev.map((t) => (t.id === topicId ? { ...t, subtopics: t.subtopics.filter((st) => st.id !== subId) } : t)));
+  }
+  function cycleSubtopicStatus(topicId, subId) {
+    setTopics((prev) => prev.map((t) => {
+      if (t.id !== topicId) return t;
+      return { ...t, subtopics: t.subtopics.map((st) => (st.id === subId ? { ...st, status: nextStatus(st.status) } : st)) };
+    }));
+  }
+
+  function mergeGuideJson(data) {
+    if (!data || !Array.isArray(data.materias)) throw new Error("formato inválido");
+    let currentSubjects = subjects;
+    const newTopics = [];
+    data.materias.forEach((m) => {
+      if (!m.nome) return;
+      let subj = currentSubjects.find((s) => s.name.toLowerCase().trim() === String(m.nome).toLowerCase().trim());
+      if (!subj) {
+        subj = { id: uid(), name: String(m.nome).trim(), color: PALETTE[currentSubjects.length % PALETTE.length], icon: null };
+        currentSubjects = [...currentSubjects, subj];
+      }
+      (m.assuntos || []).forEach((a) => {
+        if (!a || !a.nome) return;
+        const subtopics = Array.isArray(a.subtopicos) ? a.subtopicos.map((st) => (
+          typeof st === "string" ? { id: uid(), name: st, status: "nao_estudado" } : { id: uid(), name: st.nome || "Sem nome", status: STATUS_ORDER.includes(st.status) ? st.status : "nao_estudado" }
+        )) : [];
+        newTopics.push({ id: uid(), subjectId: subj.id, name: String(a.nome).trim(), status: "nao_estudado", subtopics });
+      });
+    });
+    setSubjects(currentSubjects);
+    setTopics((prev) => [...prev, ...newTopics]);
+    return newTopics.length;
+  }
+
+  function importPasted() {
+    try {
+      const data = JSON.parse(pasteText);
+      const count = mergeGuideJson(data);
+      setImportMsg(`${count} assunto(s) importado(s) com sucesso.`);
+      setPasteText("");
+    } catch (e) {
+      setImportMsg("JSON inválido — confira o formato esperado abaixo.");
+    }
+  }
+
+  async function importFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const count = mergeGuideJson(data);
+      setImportMsg(`${count} assunto(s) importado(s) com sucesso.`);
+    } catch (err) {
+      setImportMsg("Não consegui ler esse arquivo JSON.");
+    }
+    e.target.value = "";
+  }
+
+  function exportGuide() {
+    const materias = subjects.map((s) => ({
+      nome: s.name,
+      assuntos: topics.filter((t) => t.subjectId === s.id).map((t) => ({
+        nome: t.name,
+        subtopicos: t.subtopics.length ? t.subtopics.map((st) => ({ nome: st.name, status: st.status })) : undefined,
+        status: t.subtopics.length ? undefined : t.status,
+      })),
+    })).filter((m) => m.assuntos.length > 0);
+    const blob = new Blob([JSON.stringify({ materias }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "guia-de-estudos.json";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function copyFormat() {
+    if (navigator.clipboard) navigator.clipboard.writeText(GUIDE_JSON_EXAMPLE);
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {subjects.map((s) => {
+        const subjTopics = topics.filter((t) => t.subjectId === s.id);
+        const pct = subjectCompletionPct(s.id, topics);
+        const isCollapsed = !!collapsed[s.id];
+        return (
+          <Card key={s.id}>
+            <button onClick={() => toggleCollapsed(s.id)} style={{
+              background: "transparent", border: "none", padding: 0, cursor: "pointer", width: "100%",
+              display: "flex", alignItems: "center", gap: 8, marginBottom: isCollapsed ? 0 : 8, minHeight: "auto",
+            }}>
+              <span style={{ fontSize: 11, color: "var(--muted)", width: 12, display: "inline-block" }}>{isCollapsed ? "▶" : "▼"}</span>
+              <SubjectMark subject={s} size={11} />
+              <span style={{ fontSize: 14, fontWeight: 600, flex: 1, textAlign: "left" }}>{s.name}</span>
+              {subjTopics.length > 0 && <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{subjTopics.length} assunto{subjTopics.length === 1 ? "" : "s"}</span>}
+              {pct !== null && <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>{pct}%</span>}
+            </button>
+            {isCollapsed && pct !== null && (
+              <div style={{ height: 5, background: "var(--surface2)", borderRadius: 4, overflow: "hidden", marginTop: 8 }}>
+                <div style={{ width: `${pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
+              </div>
+            )}
+            {!isCollapsed && (
+              <React.Fragment>
+            {pct !== null && (
+              <div style={{ height: 6, background: "var(--surface2)", borderRadius: 4, overflow: "hidden", marginBottom: 10 }}>
+                <div style={{ width: `${pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
+              </div>
+            )}
+            {subjTopics.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Nenhum assunto cadastrado ainda.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {subjTopics.map((t) => (
+                  <div key={t.id} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: t.subtopics.length ? 8 : 0 }}>
+                      <span style={{ fontSize: 13, flex: 1 }}>{t.name}</span>
+                      {t.subtopics.length === 0 && <StatusPill status={t.status} onClick={() => cycleTopicStatus(t.id)} />}
+                      <button onClick={() => removeTopic(t.id)} style={iconBtn} aria-label="Remover assunto">×</button>
+                    </div>
+                    {t.subtopics.length > 0 && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginLeft: 10 }}>
+                        {t.subtopics.map((st) => (
+                          <div key={st.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 12.5, flex: 1, color: "var(--muted)" }}>· {st.name}</span>
+                            <StatusPill status={st.status} onClick={() => cycleSubtopicStatus(t.id, st.id)} />
+                            <button onClick={() => removeSubtopic(t.id, st.id)} style={iconBtn} aria-label="Remover subtópico">×</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 6, marginTop: 8, marginLeft: 10 }}>
+                      <input value={subtopicInputs[t.id] || ""} onChange={(e) => setSubtopicInputs((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                        onKeyDown={(e) => e.key === "Enter" && addSubtopic(t.id)} placeholder="Novo sub-tópico" style={{ ...input, flex: 1, fontSize: 12, padding: "5px 8px" }} />
+                      <button onClick={() => addSubtopic(t.id)} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>+</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {s.id === subjectId && (
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <input value={topicName} onChange={(e) => setTopicName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addTopic()} placeholder="Novo assunto" style={{ ...input, flex: 1 }} />
+                <button onClick={addTopic} style={primaryBtn}>Adicionar</button>
+              </div>
+            )}
+              </React.Fragment>
+            )}
+          </Card>
+        );
+      })}
+
+      {subjects.length === 0 && <Card><EmptyRow text="Cadastre uma matéria primeiro." /></Card>}
+      {subjects.length > 0 && (
+        <Card>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 6 }}>Adicionar assunto em qual matéria?</div>
+          <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)} style={input}>
+            {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Card>
+      )}
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Importar guia via JSON</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+          Peça pra uma IA gerar sua grade de assuntos nesse formato e cole ou suba o arquivo aqui — matérias novas são
+          criadas automaticamente.
+        </div>
+        <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} placeholder="Cole aqui o JSON gerado pela IA..."
+          style={{ ...input, width: "100%", height: 100, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical", marginBottom: 8 }} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <button onClick={importPasted} style={primaryBtn} disabled={!pasteText.trim()}>Importar texto colado</button>
+          <label style={{ ...ghostBtn, display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+            Importar arquivo .json
+            <input type="file" accept=".json" onChange={importFile} style={{ display: "none" }} />
+          </label>
+          <button onClick={exportGuide} style={ghostBtn}>Exportar guia atual</button>
+        </div>
+        {importMsg && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{importMsg}</div>}
+        <button onClick={() => setShowFormat((v) => !v)} style={{ ...ghostBtn, fontSize: 11.5, padding: "4px 8px" }}>
+          {showFormat ? "Ocultar formato esperado" : "Ver formato esperado"}
+        </button>
+        {showFormat && (
+          <div style={{ marginTop: 8 }}>
+            <pre style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, padding: 10, fontSize: 11, overflowX: "auto", fontFamily: "'JetBrains Mono', monospace" }}>{GUIDE_JSON_EXAMPLE}</pre>
+            <button onClick={copyFormat} style={{ ...ghostBtn, fontSize: 11.5, padding: "4px 8px", marginTop: 6 }}>Copiar formato (pra colar no prompt da IA)</button>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---------- Cronômetro ----------
+const MODES = [
+  { id: "pomodoro", label: "Pomodoro", direction: "down" },
+  { id: "livre", label: "Livre", direction: "up" },
+  { id: "regressiva", label: "Contagem regressiva", direction: "down" },
+];
+
+function Cronometro({ subjects, sessions, setSessions, timerSound }) {
+  const [modeId, setModeId] = useState("pomodoro");
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
+  const [customMin, setCustomMin] = useState(25);
+  const [running, setRunning] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [note, setNote] = useState("");
+  const intervalRef = useRef(null);
+  const startRef = useRef(null);
+  const accumulatedRef = useRef(0);
+  const mode = MODES.find((m) => m.id === modeId);
+  const targetSeconds = modeId === "livre" ? 0 : customMin * 60;
+
+  useEffect(() => { if (!subjectId && subjects[0]) setSubjectId(subjects[0].id); }, [subjects]);
+
+  // timestamp-based ticking avoids drift from throttled background tabs
+  useEffect(() => {
+    if (running) {
+      startRef.current = Date.now();
+      intervalRef.current = setInterval(() => {
+        setElapsed(accumulatedRef.current + (Date.now() - startRef.current) / 1000);
+      }, 1000);
+    } else {
+      clearInterval(intervalRef.current);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [running]);
+
+  useEffect(() => {
+    if (mode.direction === "down" && running && elapsed >= targetSeconds && targetSeconds > 0) {
+      accumulatedRef.current = targetSeconds;
+      setElapsed(targetSeconds);
+      setRunning(false);
+      if (timerSound) playBeep();
+    }
+  }, [elapsed, running, targetSeconds, mode.direction]);
+
+  const display = mode.direction === "down" ? Math.max(0, targetSeconds - elapsed) : elapsed;
+  const progress = mode.direction === "down" && targetSeconds > 0 ? Math.min(1, elapsed / targetSeconds) : 0;
+  const finished = mode.direction === "down" && targetSeconds > 0 && elapsed >= targetSeconds;
+
+  function reset() {
+    setRunning(false);
+    accumulatedRef.current = 0;
+    setElapsed(0);
+  }
+  function pause() {
+    accumulatedRef.current = elapsed;
+    setRunning(false);
+  }
+  function finalize() {
+    if (elapsed > 0 && subjectId) {
+      setSessions((prev) => [{ id: uid(), subjectId, mode: modeId, seconds: Math.round(elapsed), endedAt: new Date().toISOString(), note: note.trim() }, ...prev]);
+    }
+    setNote(""); reset();
+  }
+
+  const activeSubject = subjects.find((s) => s.id === subjectId);
+  const size = 220, stroke = 10, r = (size - stroke) / 2, circ = 2 * Math.PI * r;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+        {MODES.map((m) => (
+          <button key={m.id} onClick={() => { if (!running) { setModeId(m.id); reset(); } }} style={{
+            ...ghostBtn, background: modeId === m.id ? "var(--accent)" : "transparent", color: modeId === m.id ? "#14181C" : "var(--muted)",
+            borderColor: modeId === m.id ? "var(--accent)" : "var(--line)", fontWeight: modeId === m.id ? 700 : 500,
+          }}>{m.label}</button>
+        ))}
+      </div>
+
+      {mode.direction === "down" && !running && elapsed === 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--muted)" }}>
+          <span>Duração:</span>
+          <input type="number" min={1} max={240} value={customMin} onChange={(e) => setCustomMin(Number(e.target.value) || 1)} style={{ ...input, width: 64, textAlign: "center" }} />
+          <span>min</span>
+        </div>
+      )}
+
+      <div style={{ position: "relative", width: size, height: size }}>
+        <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+          <circle cx={size / 2} cy={size / 2} r={r} stroke="var(--surface2)" strokeWidth={stroke} fill="none" />
+          {mode.direction === "down" && targetSeconds > 0 && (
+            <circle cx={size / 2} cy={size / 2} r={r} stroke={finished ? "var(--accent2)" : "var(--accent)"} strokeWidth={stroke} fill="none"
+              strokeDasharray={circ} strokeDashoffset={circ * (1 - progress)} strokeLinecap="round" style={{ transition: "stroke-dashoffset 1s linear" }} />
+          )}
+        </svg>
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4 }}>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 40, fontWeight: 700, letterSpacing: "-0.02em" }}>{fmtTime(display)}</div>
+          {activeSubject && <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--muted)" }}><SubjectMark subject={activeSubject} /> {activeSubject.name}</div>}
+          {finished && <div style={{ fontSize: 12, color: "var(--accent2)", fontWeight: 600 }}>Concluído</div>}
+        </div>
+      </div>
+
+      <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)} style={{ ...input, width: 200 }} disabled={running}>
+        {subjects.length === 0 && <option value="">Cadastre uma matéria</option>}
+        {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        {!running ? (
+          <button onClick={() => setRunning(true)} style={primaryBtn} disabled={!subjectId || finished}>{elapsed > 0 ? "Retomar" : "Iniciar"}</button>
+        ) : (
+          <button onClick={pause} style={ghostBtn}>Pausar</button>
+        )}
+        <button onClick={finalize} style={ghostBtn} disabled={elapsed === 0}>Finalizar sessão</button>
+      </div>
+
+      {elapsed > 0 && <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Nota da sessão (opcional)" style={{ ...input, width: "100%", maxWidth: 340 }} />}
+
+      <VideoLessonForm subjects={subjects} setSessions={setSessions} />
+    </div>
+  );
+}
+
+function VideoLessonForm({ subjects, setSessions }) {
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
+  const [title, setTitle] = useState("");
+  const [link, setLink] = useState("");
+  const [minutes, setMinutes] = useState(30);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { if (!subjectId && subjects[0]) setSubjectId(subjects[0].id); }, [subjects]);
+
+  function save() {
+    if (!subjectId || !link.trim() || minutes <= 0) return;
+    setSessions((prev) => [{
+      id: uid(), subjectId, mode: "video", seconds: minutes * 60, endedAt: new Date().toISOString(),
+      note: title.trim() || "Aula em vídeo", link: link.trim(),
+    }, ...prev]);
+    setTitle(""); setLink(""); setMinutes(30);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  return (
+    <Card style={{ width: "100%", maxWidth: 400 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>🎥 Registrar aula em vídeo</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.4 }}>
+        Já assistiu uma aula fora do app? Salve o link e registre as horas sem precisar rodar o cronômetro.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)} style={input}>
+          {subjects.length === 0 && <option value="">Cadastre uma matéria</option>}
+          {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título (opcional)" style={input} />
+        <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="Link do vídeo (YouTube, etc.)" style={input} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Duração assistida:</span>
+          <input type="number" min={1} value={minutes} onChange={(e) => setMinutes(Number(e.target.value) || 1)} style={{ ...input, width: 64, textAlign: "center" }} />
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>min</span>
+        </div>
+        <button onClick={save} style={primaryBtn} disabled={!subjectId || !link.trim()}>{saved ? "Salvo ✓" : "Salvar aula"}</button>
+      </div>
+    </Card>
+  );
+}
+
+// ---------- Sessões ----------
+function Sessoes({ subjects, sessions }) {
+  const grouped = useMemo(() => {
+    const map = {};
+    sessions.forEach((s) => {
+      const day = new Date(s.endedAt).toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "short" });
+      map[day] = map[day] || [];
+      map[day].push(s);
+    });
+    return map;
+  }, [sessions]);
+
+  if (sessions.length === 0) return <Card><EmptyRow text="Nenhuma sessão registrada ainda. Use o cronômetro para começar." /></Card>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {Object.entries(grouped).map(([day, list]) => (
+        <div key={day}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6, textTransform: "capitalize" }}>{day}</div>
+          <Card style={{ padding: 4 }}>
+            {list.map((s, i) => {
+              const subj = subjects.find((x) => x.id === s.subjectId);
+              return (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderBottom: i < list.length - 1 ? "1px solid var(--line)" : "none" }}>
+                  <SubjectMark subject={subj} size={10} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14 }}>{s.mode === "video" ? "🎥 " : ""}{subj?.name || "Matéria removida"}</div>
+                    {s.note && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 1 }}>{s.note}</div>}
+                    {s.link && <a href={s.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: "var(--accent2)" }}>Abrir vídeo ↗</a>}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>{fmtDuration(s.seconds)}</div>
+                </div>
+              );
+            })}
+          </Card>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------- Importer (com upload de PDF) ----------
+function Importer({ subjects, setQuestions, setTab }) {
+  const [source, setSource] = useState("");
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
+  const [examText, setExamText] = useState("");
+  const [keyText, setKeyText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [loadingExam, setLoadingExam] = useState(false);
+  const [loadingKey, setLoadingKey] = useState(false);
+  const [fileError, setFileError] = useState("");
+  const examFileRef = useRef(null);
+  const keyFileRef = useRef(null);
+
+  useEffect(() => { if (!subjectId && subjects[0]) setSubjectId(subjects[0].id); }, [subjects]);
+
+  async function handleExamFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileError("");
+    setLoadingExam(true);
+    try {
+      const text = await extractAnyText(file);
+      setExamText(text);
+      if (!source.trim()) setSource(file.name.replace(/\.(pdf|txt)$/i, ""));
+    } catch (err) {
+      setFileError("Não consegui ler esse arquivo. Tente colar o texto manualmente.");
+    } finally {
+      setLoadingExam(false);
+      e.target.value = "";
+    }
+  }
+
+  async function handleKeyFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileError("");
+    setLoadingKey(true);
+    try {
+      const text = await extractAnyText(file);
+      setKeyText(text);
+    } catch (err) {
+      setFileError("Não consegui ler o gabarito. Tente colar o texto manualmente.");
+    } finally {
+      setLoadingKey(false);
+      e.target.value = "";
+    }
+  }
+
+  function runParse() {
+    const parsedQuestions = parseExamText(examText);
+    const answerMap = parseAnswerKey(keyText);
+    const merged = parsedQuestions.map((q) => ({ ...q, answer: answerMap[q.num] || null }));
+    setPreview(merged);
+  }
+
+  function confirmImport() {
+    if (!preview) return;
+    const toAdd = preview.filter((q) => q.hasAllAlts).map((q) => ({
+      id: uid(), source: source.trim() || "Sem título", subjectId, topic: "",
+      statement: q.statement, alternatives: q.alternatives, answer: q.answer,
+      difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
+    }));
+    setQuestions((prev) => [...toAdd, ...prev]);
+    setExamText(""); setKeyText(""); setPreview(null);
+    setTab("questoes");
+  }
+
+  const okCount = preview ? preview.filter((q) => q.hasAllAlts).length : 0;
+  const withAnswerCount = preview ? preview.filter((q) => q.hasAllAlts && q.answer).length : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Importar prova</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+          Suba o PDF da prova e o do gabarito (ou cole o texto direto). O sistema extrai o texto do PDF no seu
+          próprio navegador — nada é enviado a um servidor — e estrutura as questões automaticamente.
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="Ex: ITA 2025" style={{ ...input, flex: 1, minWidth: 140 }} />
+          <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)} style={input}>
+            {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <FileDrop label="PDF da prova" onFile={handleExamFile} inputRef={examFileRef} loading={loadingExam} hasContent={!!examText.trim()} />
+          <FileDrop label="PDF do gabarito" onFile={handleKeyFile} inputRef={keyFileRef} loading={loadingKey} hasContent={!!keyText.trim()} />
+        </div>
+
+        {fileError && <div style={{ fontSize: 12.5, color: "var(--danger)", marginBottom: 10 }}>{fileError}</div>}
+
+        <details>
+          <summary style={{ fontSize: 12.5, color: "var(--muted)", cursor: "pointer", marginBottom: 8 }}>
+            Ver / editar texto extraído (ou colar manualmente)
+          </summary>
+          <textarea value={examText} onChange={(e) => setExamText(e.target.value)}
+            placeholder={"Questão 01\nEnunciado...\nA) ...\nB) ...\nC) ...\nD) ...\nE) ...\n\nQuestão 02\n..."}
+            style={{ ...input, width: "100%", height: 140, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical", marginTop: 6 }} />
+          <div style={{ height: 8 }} />
+          <textarea value={keyText} onChange={(e) => setKeyText(e.target.value)}
+            placeholder={"Gabarito:\n01 - C\n02 - A\n03 - E"}
+            style={{ ...input, width: "100%", height: 80, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical" }} />
+        </details>
+
+        <div style={{ marginTop: 12 }}>
+          <button onClick={runParse} style={primaryBtn} disabled={!examText.trim()}>Analisar</button>
+        </div>
+      </Card>
+
+      {preview && (
+        <Card>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Pré-visualização</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+            {preview.length} questões encontradas · {okCount} com as 5 alternativas completas · {withAnswerCount} com gabarito cruzado
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+            {preview.map((q) => (
+              <div key={q.num} style={{ border: "1px solid var(--line)", borderRadius: 6, padding: "8px 10px", fontSize: 12.5, background: q.hasAllAlts ? "var(--surface2)" : "transparent" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                  <span style={{ fontWeight: 600 }}>Questão {q.num}</span>
+                  <span style={{ color: q.hasAllAlts ? "var(--ok)" : "var(--danger)", fontFamily: "'JetBrains Mono', monospace" }}>
+                    {q.hasAllAlts ? (q.answer ? `gabarito: ${q.answer}` : "sem gabarito") : "alternativas incompletas"}
+                  </span>
+                </div>
+                <div style={{ color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.statement || "(sem enunciado detectado)"}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+            <button onClick={confirmImport} style={primaryBtn} disabled={okCount === 0}>Adicionar {okCount} questões ao banco</button>
+            <button onClick={() => setPreview(null)} style={ghostBtn}>Descartar</button>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function FileDrop({ label, onFile, inputRef, loading, hasContent }) {
+  return (
+    <label style={{
+      border: `1px dashed ${hasContent ? "var(--accent)" : "var(--line)"}`, borderRadius: 8, padding: "16px 10px",
+      display: "flex", flexDirection: "column", alignItems: "center", gap: 4, cursor: "pointer",
+      background: hasContent ? "#26303A" : "var(--surface2)", textAlign: "center",
+    }}>
+      <input ref={inputRef} type="file" accept=".pdf,.txt" onChange={onFile} style={{ display: "none" }} />
+      <span style={{ fontSize: 20 }}>{loading ? "⏳" : hasContent ? "✓" : "📄"}</span>
+      <span style={{ fontSize: 12.5, fontWeight: 600 }}>{label}</span>
+      <span style={{ fontSize: 11, color: "var(--muted)" }}>{loading ? "lendo..." : hasContent ? "carregado — trocar arquivo" : "clique para subir"}</span>
+    </label>
+  );
+}
+
+// ---------- Question bank + practice ----------
+function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEmoji }) {
+  const [filterSubject, setFilterSubject] = useState("all");
+  const [manualOpen, setManualOpen] = useState(false);
+  const [practiceQueue, setPracticeQueue] = useState(null);
+
+  const filtered = questions.filter((q) => filterSubject === "all" || q.subjectId === filterSubject);
+
+  function startPractice(count) {
+    const pool = filtered.filter((q) => q.answer);
+    const shuffled = [...pool].sort(() => Math.random() - 0.5).slice(0, count);
+    if (shuffled.length > 0) setPracticeQueue(shuffled.map((q) => q.id));
+  }
+  function removeQuestion(id) { setQuestions((prev) => prev.filter((q) => q.id !== id)); }
+  function addManual(q) {
+    setQuestions((prev) => [{ ...q, id: uid(), attempts: 0, errors: 0, userAnswer: null, correct: null, difficulty: null }, ...prev]);
+    setManualOpen(false);
+  }
+  function recordAnswer(id, letter) {
+    setQuestions((prev) => prev.map((q) => {
+      if (q.id !== id) return q;
+      const isCorrect = letter === q.answer;
+      return { ...q, userAnswer: letter, correct: isCorrect, attempts: q.attempts + 1, errors: q.errors + (isCorrect ? 0 : 1) };
+    }));
+  }
+
+  if (practiceQueue) return <Practice questions={questions} queue={practiceQueue} onAnswer={recordAnswer} onExit={() => setPracticeQueue(null)} celebrationEmoji={celebrationEmoji} />;
+  if (questions.length === 0) return <Card><EmptyRow text="Nenhuma questão no banco ainda." action="Importar prova" onAction={() => setTab("importar")} /></Card>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Banco de questões · {filtered.length}</div>
+          <select value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)} style={input}>
+            <option value="all">Todas as matérias</option>
+            {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => startPractice(5)} style={primaryBtn} disabled={filtered.filter((q) => q.answer).length === 0}>Praticar 5</button>
+          <button onClick={() => startPractice(10)} style={ghostBtn} disabled={filtered.filter((q) => q.answer).length === 0}>Praticar 10</button>
+          <button onClick={() => setManualOpen((v) => !v)} style={ghostBtn}>{manualOpen ? "Cancelar" : "Adicionar manualmente"}</button>
+        </div>
+      </Card>
+
+      {manualOpen && <ManualQuestionForm subjects={subjects} onSave={addManual} />}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {filtered.map((q) => {
+          const subj = subjects.find((s) => s.id === q.subjectId);
+          return (
+            <Card key={q.id} style={{ padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted)" }}>
+                  <SubjectMark subject={subj} /> {subj?.name || "—"} <span>· {q.source}</span>
+                </div>
+                <button onClick={() => removeQuestion(q.id)} style={iconBtn} aria-label="Remover questão">×</button>
+              </div>
+              <div style={{ fontSize: 13.5, marginBottom: 6 }}>{q.statement || "(sem enunciado)"}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", display: "flex", gap: 12 }}>
+                <span>Gabarito: {q.answer || "—"}</span>
+                <span>Tentativas: {q.attempts}</span>
+                <span>Erros: {q.errors}</span>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ManualQuestionForm({ subjects, onSave }) {
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
+  const [source, setSource] = useState("");
+  const [topic, setTopic] = useState("");
+  const [statement, setStatement] = useState("");
+  const [alts, setAlts] = useState({ A: "", B: "", C: "", D: "", E: "" });
+  const [answer, setAnswer] = useState("A");
+
+  function save() {
+    if (!statement.trim()) return;
+    onSave({ subjectId, source: source.trim() || "Manual", topic: topic.trim(), statement: statement.trim(), alternatives: alts, answer });
+    setSource(""); setTopic(""); setStatement(""); setAlts({ A: "", B: "", C: "", D: "", E: "" });
+  }
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Nova questão</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)} style={input}>
+            {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="Fonte (ex: ITA 2025)" style={{ ...input, flex: 1, minWidth: 120 }} />
+          <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="Tópico (ex: Geometria)" style={{ ...input, flex: 1, minWidth: 120 }} />
+        </div>
+        <textarea value={statement} onChange={(e) => setStatement(e.target.value)} placeholder="Enunciado" style={{ ...input, width: "100%", height: 60, resize: "vertical" }} />
+        {LETTERS.map((l) => (
+          <div key={l} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12.5, color: "var(--muted)", width: 60 }}>
+              <input type="radio" name="answer" checked={answer === l} onChange={() => setAnswer(l)} /> {l})
+            </label>
+            <input value={alts[l]} onChange={(e) => setAlts((prev) => ({ ...prev, [l]: e.target.value }))} placeholder={`Alternativa ${l}`} style={{ ...input, flex: 1 }} />
+          </div>
+        ))}
+        <div><button onClick={save} style={primaryBtn} disabled={!statement.trim()}>Salvar questão</button></div>
+      </div>
+    </Card>
+  );
+}
+
+function Practice({ questions, queue, onAnswer, onExit, celebrationEmoji }) {
+  const [idx, setIdx] = useState(0);
+  const [picked, setPicked] = useState(null);
+  const q = questions.find((x) => x.id === queue[idx]);
+  const correctCount = queue.slice(0, idx).filter((id) => questions.find((x) => x.id === id)?.correct).length;
+
+  if (!q) {
+    return (
+      <Card>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Sessão de prática concluída {celebrationEmoji || "🔥"}</div>
+        <div style={{ fontSize: 13.5, color: "var(--muted)", marginBottom: 12 }}>{correctCount}/{queue.length} acertos</div>
+        <button onClick={onExit} style={primaryBtn}>Voltar ao banco</button>
+      </Card>
+    );
+  }
+
+  function choose(letter) { if (picked) return; setPicked(letter); onAnswer(q.id, letter); }
+  function next() { setPicked(null); setIdx((i) => i + 1); }
+
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+        <span>Questão {idx + 1} de {queue.length}</span>
+        <button onClick={onExit} style={{ ...iconBtn, fontSize: 12.5 }}>Sair</button>
+      </div>
+      <div style={{ fontSize: 14.5, marginBottom: 14, lineHeight: 1.5 }}>{q.statement}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {LETTERS.filter((l) => q.alternatives?.[l]).map((l) => {
+          const isCorrectAns = picked && l === q.answer;
+          const isWrongPick = picked && picked === l && l !== q.answer;
+          return (
+            <button key={l} onClick={() => choose(l)} disabled={!!picked} style={{
+              textAlign: "left", padding: "10px 12px", borderRadius: 6,
+              border: `1px solid ${isCorrectAns ? "var(--ok)" : isWrongPick ? "var(--danger)" : "var(--line)"}`,
+              background: isCorrectAns ? "#8FBF5F1A" : isWrongPick ? "#D970661A" : "var(--surface2)",
+              color: "var(--text)", fontSize: 13.5, cursor: picked ? "default" : "pointer",
+            }}><strong>{l})</strong> {q.alternatives[l]}</button>
+          );
+        })}
+      </div>
+      {picked && (
+        <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 13, color: picked === q.answer ? "var(--ok)" : "var(--danger)", fontWeight: 600 }}>
+            {picked === q.answer ? "Certo!" : `Errado — resposta: ${q.answer}`}
+          </span>
+          <button onClick={next} style={primaryBtn}>{idx + 1 < queue.length ? "Próxima" : "Finalizar"}</button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------- inline style tokens ----------
+const input = { background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, color: "var(--text)", padding: "9px 9px", fontSize: 13.5, outline: "none" };
+const primaryBtn = { background: "var(--accent)", color: "#14181C", border: "none", borderRadius: 6, padding: "9px 14px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" };
+const ghostBtn = { background: "transparent", color: "var(--text)", border: "1px solid var(--line)", borderRadius: 6, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" };
+const iconBtn = { background: "transparent", border: "none", color: "var(--muted)", fontSize: 18, cursor: "pointer", lineHeight: 1, padding: "0 4px", minHeight: "auto" };
+
+ReactDOM.createRoot(document.getElementById("root")).render(<StudyApp />);
+
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
