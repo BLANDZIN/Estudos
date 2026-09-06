@@ -342,13 +342,22 @@ function StudyApp() {
   }, []);
 
   // persist on change (debounced), skipping the very first render after load
+  const latestStateRef = useRef();
+  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+
+  function flushSaveNow() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(latestStateRef.current));
+    } catch (e) {}
+  }
+
   useEffect(() => {
     if (!loaded) return;
     if (!firstSaveSkipped.current) { firstSaveSkipped.current = true; return; }
     setSyncState("saving");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const payload = JSON.stringify({ subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle });
+      const payload = JSON.stringify(latestStateRef.current);
       let localOk = false;
       try {
         localStorage.setItem(STORAGE_KEY, payload);
@@ -363,6 +372,21 @@ function StudyApp() {
     }, 500);
     return () => clearTimeout(saveTimer.current);
   }, [subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
+
+  // salvamento de emergência: grava na hora (sem esperar o debounce) assim que a aba é
+  // minimizada, trocada ou fechada — evita perder a última alteração feita antes de sair
+  useEffect(() => {
+    if (!loaded) return;
+    function handleHide() {
+      if (document.visibilityState === "hidden") flushSaveNow();
+    }
+    window.addEventListener("visibilitychange", handleHide);
+    window.addEventListener("pagehide", flushSaveNow);
+    return () => {
+      window.removeEventListener("visibilitychange", handleHide);
+      window.removeEventListener("pagehide", flushSaveNow);
+    };
+  }, [loaded]);
 
   // avisa antes de fechar/recarregar se não deu pra salvar localmente
   useEffect(() => {
@@ -520,7 +544,7 @@ function Header({ tab, setTab, syncState, appName }) {
       <div style={{ maxWidth: 720, margin: "0 auto", padding: "14px 16px 0" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
           <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "-0.01em" }}>{appName || "Estudos"}</span>
-          <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>v0.8.1</span>
+          <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>v0.8.2</span>
           {syncLabel && <span style={{ fontSize: 11, color: syncColor, marginLeft: "auto" }}>{syncLabel}</span>}
         </div>
         <nav style={{ display: "flex", gap: 4, overflowX: "auto" }}>
@@ -794,15 +818,10 @@ function SyncPanel(props) {
     setGoals(mergedGoals);
     setTopics(mergedTopics);
 
-    // personalização: o objetivo aqui é "levar tudo", inclusive papel de parede — aplica o que veio do outro lado
-    if (remote.wallpaper !== undefined) setWallpaper(remote.wallpaper);
-    if (remote.accent) setAccent(remote.accent);
-    if (remote.appName) setAppName(remote.appName);
-    if (typeof remote.greeting === "string") setGreeting(remote.greeting);
-    if (remote.font) setFont(remote.font);
-    if (typeof remote.timerSound === "boolean") setTimerSound(remote.timerSound);
-    if (remote.celebrationEmoji) setCelebrationEmoji(remote.celebrationEmoji);
-    if (remote.cardStyle) setCardStyle(remote.cardStyle);
+    // personalização: cada aparelho mantém a própria cara. Única exceção é o papel de
+    // parede — se ESTE aparelho ainda não tem um, aceita o do outro lado; se já tem, mantém
+    // o seu (nunca apaga um wallpaper já configurado com o "nada" do outro aparelho).
+    if (!local.wallpaper && remote.wallpaper) setWallpaper(remote.wallpaper);
 
     setResultMsg(`Sincronizado! Agora: ${mergedSubjects.length} matérias, ${mergedSessions.length} sessões, ${mergedTopics.length} assuntos.`);
     syncedRef.current = true;
