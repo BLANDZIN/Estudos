@@ -1,0 +1,7 @@
+.env
+agnes_memory.db
+*.pem
+__pycache__/
+*.pyc
+.venv/
+venv/
