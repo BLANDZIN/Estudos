@@ -5,25 +5,39 @@ lugar — local ou na rede, ver abaixo), memória própria (separada da LLM) e
 um conjunto fechado de ferramentas que ela pode *pedir* para o app
 executar — ela nunca executa nada diretamente.
 
-## Provedor de IA: local ou remoto
+## Provedor de IA: local, remoto ou API
 
-`ai_provider.py` define duas formas de chegar até o modelo, escolhidas só
+`ai_provider.py` define três formas de chegar até o modelo, escolhidas só
 por configuração no `.env` (`AGNES_PROVIDER`), sem tocar em nenhum outro
-arquivo:
+arquivo — `main.py`, `tools.py`, `memory.py` e `agnes_persona.py` não sabem
+nem precisam saber qual está ativo:
 
 - **`local`** — o servidor de modelo (Ollama, llama.cpp server...) roda no
-  **mesmo dispositivo** que este backend. Isso cobre tanto "PC rodando
-  Ollama" quanto "celular rodando llama.cpp via Termux, com este backend
-  também rodando no celular". Sempre fala com `127.0.0.1` — nunca sai do
-  aparelho, não existe superfície de rede a se preocupar.
+  **mesmo dispositivo** que este backend. Sempre fala com `127.0.0.1` —
+  nunca sai do aparelho, não existe superfície de rede a se preocupar.
 - **`remote`** — o servidor de modelo está em **outro** dispositivo da rede
-  (ex: você quer usar o modelo maior do PC a partir do celular). Precisa de
-  `AGNES_REMOTE_HOST` configurado explicitamente.
+  local (ex: você quer usar o modelo maior do PC a partir do celular).
+  Precisa de `AGNES_REMOTE_HOST` configurado explicitamente.
+- **`api`** — um serviço de IA na nuvem (OpenAI, Anthropic, OpenRouter,
+  Groq...), usando uma chave de API. A chave vive só no `.env` deste
+  backend — nunca chega no frontend nem no repositório.
 
 Cada um ainda aceita um "flavor" de API (`AGNES_LLM_FLAVOR`): `ollama` (API
-nativa do Ollama) ou `openai` (API compatível com OpenAI, que é o que o
-`llama-server` do llama.cpp expõe, junto com LM Studio etc). Ou seja:
-llama.cpp local no celular = `AGNES_PROVIDER=local` + `AGNES_LLM_FLAVOR=openai`.
+nativa do Ollama), `openai` (API compatível com OpenAI — llama.cpp server,
+LM Studio, OpenAI de verdade, OpenRouter, Groq, Together...) ou `anthropic`
+(API nativa da Anthropic, só com `api`).
+
+### Presets prontos (copie o bloco que se aplica pro seu `.env`)
+
+| Cenário | `AGNES_PROVIDER` | `AGNES_LLM_FLAVOR` | Outras variáveis |
+|---|---|---|---|
+| Ollama no PC (backend também no PC) | `local` | `ollama` | `AGNES_LOCAL_LLM_PORT=11434` |
+| llama.cpp no celular via Termux (backend também no celular) | `local` | `openai` | `AGNES_LOCAL_LLM_PORT=8080` (porta do `llama-server`) |
+| Celular usando Ollama do PC pela rede | `remote` | `ollama` | `AGNES_REMOTE_HOST=<IP do PC>` |
+| Celular usando llama.cpp do PC pela rede | `remote` | `openai` | `AGNES_REMOTE_HOST=<IP do PC>`, `AGNES_REMOTE_PORT=8080` |
+| OpenAI (nuvem) | `api` | `openai` | `AGNES_API_KEY=...`, `AGNES_API_BASE_URL=https://api.openai.com` |
+| Anthropic (nuvem) | `api` | `anthropic` | `AGNES_API_KEY=...`, `AGNES_API_BASE_URL=https://api.anthropic.com` |
+| OpenRouter/Groq/Together (nuvem, compatível OpenAI) | `api` | `openai` | `AGNES_API_KEY=...`, `AGNES_API_BASE_URL=` do provedor |
 
 ## Segurança de rede — leia antes de usar `--host 0.0.0.0`
 
@@ -145,9 +159,17 @@ rápidos, vale configurar HTTPS de verdade na frente do backend:
 - Nenhum segredo vive no código. Configuração sensível vai no `.env`
   (nunca commitado — está no `.gitignore`, junto com `agnes_memory.db` e
   qualquer `*.pem` de certificado).
+- **Chave de API** (`AGNES_API_KEY`, quando `AGNES_PROVIDER=api`): fica só
+  no `.env` deste backend. O frontend nunca recebe, nunca guarda e nunca
+  manda essa chave — quem anexa ela na requisição pro provedor de nuvem é
+  este backend, do lado do servidor. Se em algum momento vocês migrarem
+  esse backend pra um deploy público de verdade, tratem `AGNES_API_KEY`
+  como segredo de produção (variável de ambiente do serviço de hospedagem,
+  nunca em arquivo versionado).
 - A LLM nunca recebe acesso a banco de dados, sistema de arquivos ou
   execução de código. Ela só pode pedir uma das ferramentas listadas em
   `tools.py`, validadas aqui e executadas pelo frontend.
-- Trocar de provedor (local/remoto, Ollama/llama.cpp) é configuração em
-  `ai_provider.py`/`.env` — a lógica de conversa, memória e ferramentas
-  (`main.py`, `tools.py`, `memory.py`, `agnes_persona.py`) não muda.
+- Trocar de provedor (local/remoto/API, Ollama/llama.cpp/OpenAI/Anthropic)
+  é configuração em `ai_provider.py`/`.env` — a lógica de conversa, memória
+  e ferramentas (`main.py`, `tools.py`, `memory.py`, `agnes_persona.py`)
+  não muda.

@@ -3,9 +3,11 @@ Abstração do provedor de IA. A ideia é que NADA no resto do backend (nem no
 frontend) saiba os detalhes de qual modelo/servidor está sendo usado — só
 conhece o contrato `AIProvider.chat(messages) -> str`.
 
-Duas dimensões independentes aqui, de propósito:
+Três formas de chegar até o modelo (`AGNES_PROVIDER` no `.env`), de propósito
+desacopladas da lógica de conversa/memória/ferramentas — trocar de uma pra
+outra é só configuração:
 
-1. ONDE o servidor de inferência está (`Local` vs `Remote`):
+1. ONDE o servidor de inferência está (`Local` vs `Remote` vs `API`):
    - LocalLLMProvider: sempre fala com 127.0.0.1 (loopback) — o servidor de
      modelo roda no MESMO dispositivo que este backend. Cobre tanto "PC
      rodando Ollama" quanto "celular rodando llama.cpp via Termux, com este
@@ -14,15 +16,22 @@ Duas dimensões independentes aqui, de propósito:
    - RemoteLLMProvider: fala com um host configurável (ex: o IP do PC na
      rede local), pra quando o backend/navegador estão num dispositivo e o
      modelo roda em outro (ex: celular usando o modelo maior do PC).
+   - APIProvider: fala com um serviço de IA hospedado na nuvem (OpenAI,
+     Anthropic, OpenRouter, Groq...), usando uma chave de API. A chave só
+     existe no `.env` do backend — nunca chega no frontend nem no repositório.
 
 2. QUE FORMATO de API o servidor de inferência fala (`flavor`):
-   - "ollama"  → API nativa do Ollama (/api/chat)
-   - "openai"  → API compatível com OpenAI (/v1/chat/completions) — é o que
-     o servidor do llama.cpp (`llama-server`) expõe, junto com LM Studio,
-     text-generation-webui (modo openai), etc.
+   - "ollama"    → API nativa do Ollama (/api/chat)
+   - "openai"    → API compatível com OpenAI (/v1/chat/completions) — é o
+     que o servidor do llama.cpp (`llama-server`) expõe, junto com LM
+     Studio, text-generation-webui (modo openai), OpenAI de verdade,
+     OpenRouter, Groq, Together, etc.
+   - "anthropic" → API nativa da Anthropic (/v1/messages) — só faz sentido
+     com APIProvider.
 
 Isso significa: llama.cpp local no celular = LocalLLMProvider(flavor="openai").
 Ollama no PC acessado do celular = RemoteLLMProvider(flavor="ollama", host=...).
+GPT/Claude/etc. na nuvem = APIProvider(flavor="openai" ou "anthropic", api_key=...).
 Trocar de um pra outro é só configuração (.env) — nada no resto do backend
 ou no frontend muda.
 """
@@ -47,31 +56,63 @@ class AIProvider(ABC):
 # "local" ou "remoto", só recebem a base_url já pronta.
 # ---------------------------------------------------------------------------
 
-async def _ollama_chat(base_url: str, model: str, messages: list[dict]) -> str:
+async def _ollama_chat(base_url: str, model: str, messages: list[dict], api_key: Optional[str] = None) -> str:
     # https://github.com/ollama/ollama/blob/main/docs/api.md#chat-request
     url = f"{base_url.rstrip('/')}/api/chat"
     payload = {"model": model, "messages": messages, "stream": False}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         return data.get("message", {}).get("content", "").strip()
 
 
-async def _openai_compatible_chat(base_url: str, model: str, messages: list[dict]) -> str:
-    # Formato usado por llama.cpp server, LM Studio, text-generation-webui (modo openai) etc.
+async def _openai_compatible_chat(base_url: str, model: str, messages: list[dict], api_key: Optional[str] = None) -> str:
+    # Formato usado por llama.cpp server, LM Studio, text-generation-webui (modo openai),
+    # e também por serviços de API na nuvem: OpenAI, OpenRouter, Groq, Together, etc.
     url = f"{base_url.rstrip('/')}/v1/chat/completions"
     payload = {"model": model, "messages": messages}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"].strip()
 
 
+async def _anthropic_chat(base_url: str, model: str, messages: list[dict], api_key: Optional[str] = None) -> str:
+    # API nativa da Anthropic: system fica separado da lista de mensagens,
+    # e a autenticação usa o header x-api-key (não Bearer).
+    if not api_key:
+        raise RuntimeError("Flavor 'anthropic' precisa de AGNES_API_KEY configurado.")
+    system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+    turns = [m for m in messages if m.get("role") in ("user", "assistant")]
+    url = f"{base_url.rstrip('/')}/v1/messages"
+    payload = {
+        "model": model,
+        "max_tokens": 1024,
+        "messages": turns,
+    }
+    if system_parts:
+        payload["system"] = "\n\n".join(system_parts)
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        blocks = data.get("content", [])
+        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+
+
 _FLAVOR_HANDLERS = {
     "ollama": _ollama_chat,
     "openai": _openai_compatible_chat,
+    "anthropic": _anthropic_chat,
 }
 
 
@@ -139,13 +180,46 @@ class RemoteLLMProvider(AIProvider):
             ) from e
 
 
+class APIProvider(AIProvider):
+    """Modelo hospedado por um serviço externo via API (OpenAI, Anthropic,
+    OpenRouter, Groq, Together, etc.). Precisa de uma chave de API — que
+    NUNCA fica no frontend nem no repositório, só no `.env` local
+    (git-ignorado). O backend é quem anexa a chave na requisição; o
+    frontend nunca vê nem manda essa chave."""
+
+    def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None,
+                 flavor: Optional[str] = None, api_key: Optional[str] = None):
+        self.base_url = base_url or os.getenv("AGNES_API_BASE_URL", "https://api.openai.com")
+        self.model = model or os.getenv("AGNES_LLM_MODEL", "gpt-4o-mini")
+        self.flavor = flavor or os.getenv("AGNES_LLM_FLAVOR", "openai")
+        self.api_key = api_key or os.getenv("AGNES_API_KEY")
+        if not self.api_key:
+            raise RuntimeError(
+                "AGNES_API_KEY não configurado no .env — obrigatório quando AGNES_PROVIDER=api."
+            )
+        self._handler = _resolve_flavor(self.flavor)
+
+    async def chat(self, messages: list[dict]) -> str:
+        try:
+            return await self._handler(self.base_url, self.model, messages, api_key=self.api_key)
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"O serviço de API recusou a requisição ({e.response.status_code}). "
+                f"Confira AGNES_API_KEY e AGNES_LLM_MODEL no .env."
+            ) from e
+        except httpx.ConnectError as e:
+            raise RuntimeError(f"Não consegui alcançar {self.base_url}.") from e
+
+
 def get_provider() -> AIProvider:
     """Ponto único de escolha do provedor, controlado por AGNES_PROVIDER no
-    .env ('local' ou 'remote'). Nada mais no backend precisa saber qual foi
-    escolhido — só chama provider.chat(messages)."""
+    .env ('local', 'remote' ou 'api'). Nada mais no backend precisa saber
+    qual foi escolhido — só chama provider.chat(messages)."""
     kind = os.getenv("AGNES_PROVIDER", "local").strip().lower()
     if kind == "local":
         return LocalLLMProvider()
     if kind == "remote":
         return RemoteLLMProvider()
-    raise RuntimeError(f"AGNES_PROVIDER inválido: '{kind}'. Use 'local' ou 'remote'.")
+    if kind == "api":
+        return APIProvider()
+    raise RuntimeError(f"AGNES_PROVIDER inválido: '{kind}'. Use 'local', 'remote' ou 'api'.")
