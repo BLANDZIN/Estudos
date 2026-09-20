@@ -127,6 +127,22 @@ def _resolve_flavor(flavor: str):
 # Providers concretos
 # ---------------------------------------------------------------------------
 
+def _friendly_http_error(e: "httpx.HTTPStatusError", base_url: str, flavor: str, model: str) -> RuntimeError:
+    status = e.response.status_code
+    if status == 404:
+        # Ollama (e outros) respondem 404 quando o "model" pedido não existe no servidor —
+        # é o erro mais comum aqui, então vale uma mensagem específica em vez de genérica.
+        return RuntimeError(
+            f"O servidor de modelo respondeu 404 em {base_url} (flavor={flavor}) — o mais comum é o "
+            f"nome do modelo estar errado. Você pediu model='{model}'. Confira o nome exato disponível "
+            f"(ex: 'ollama list' ou 'curl {base_url}/api/tags') e ajuste AGNES_LLM_MODEL no .env."
+        )
+    return RuntimeError(
+        f"O servidor de modelo respondeu {status} em {base_url} (flavor={flavor}). "
+        f"Detalhe: {e.response.text[:200]}"
+    )
+
+
 class LocalLLMProvider(AIProvider):
     """Servidor de modelo rodando no MESMO dispositivo que este backend
     (loopback only — nunca sai da máquina). Cobre tanto um PC rodando
@@ -147,6 +163,8 @@ class LocalLLMProvider(AIProvider):
                 f"Não consegui falar com o modelo local em {self.base_url} "
                 f"(flavor={self.flavor}). Ele está rodando neste dispositivo?"
             ) from e
+        except httpx.HTTPStatusError as e:
+            raise _friendly_http_error(e, self.base_url, self.flavor, self.model) from e
 
 
 class RemoteLLMProvider(AIProvider):
@@ -178,6 +196,8 @@ class RemoteLLMProvider(AIProvider):
                 f"Não consegui alcançar {self.base_url} (flavor={self.flavor}). "
                 f"Confira se o servidor remoto está rodando e acessível pela rede."
             ) from e
+        except httpx.HTTPStatusError as e:
+            raise _friendly_http_error(e, self.base_url, self.flavor, self.model) from e
 
 
 class APIProvider(AIProvider):
@@ -203,10 +223,7 @@ class APIProvider(AIProvider):
         try:
             return await self._handler(self.base_url, self.model, messages, api_key=self.api_key)
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(
-                f"O serviço de API recusou a requisição ({e.response.status_code}). "
-                f"Confira AGNES_API_KEY e AGNES_LLM_MODEL no .env."
-            ) from e
+            raise _friendly_http_error(e, self.base_url, self.flavor, self.model) from e
         except httpx.ConnectError as e:
             raise RuntimeError(f"Não consegui alcançar {self.base_url}.") from e
 

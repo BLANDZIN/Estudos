@@ -81,6 +81,48 @@ uvicorn main:app --reload --port 8787
 
 Teste rápido: `curl http://127.0.0.1:8787/health` deve responder `{"ok": true, ...}`.
 
+### Modo recomendado pra PC/rede local: abra o app pelo próprio backend
+
+Este backend também serve o `index.html` (e `manifest.json`, `sw.js`, ícones)
+direto — não precisa de um segundo servidor. Depois de rodar o `uvicorn`
+acima, abra:
+
+```
+http://127.0.0.1:8787/
+```
+
+Vantagem: app e API ficam na **mesma origem**, então o navegador nem monta
+o preflight de CORS pra `/chat` — funciona de cara, sem precisar mexer em
+`AGNES_ALLOWED_ORIGINS`. É esse o modo mais simples pra usar no próprio PC,
+e o mesmo endereço funciona do celular trocando `127.0.0.1` pelo IP do PC
+na rede (ver "Usando no celular" abaixo).
+
+O app publicado no GitHub Pages continua funcionando do jeito de sempre — a
+origem dele (`https://blandzin.github.io` ou a que você configurou) já está
+em `AGNES_ALLOWED_ORIGINS` especificamente pra esse caso. Isso aqui é um
+caminho **a mais** pra desenvolvimento/uso local, não uma substituição.
+
+### Se preferir servir o frontend separado (ex: só a API roda em Python)
+
+Também funciona, mas **nunca abra o `index.html` com duplo clique**
+(`file:///...`) — o navegador manda `Origin: null` nesse caso, que não está
+(e não deveria estar, por padrão) em `AGNES_ALLOWED_ORIGINS`, e o
+`CORSMiddleware` rejeita o preflight com 400. Isso é a validação de
+segurança funcionando corretamente, não um bug pra contornar afrouxando
+CORS com `*`. Sirva por HTTP local de verdade:
+
+```bash
+# na pasta onde está o index.html (raiz do projeto, não dentro de backend/)
+python -m http.server 8080
+# abra http://localhost:8080/index.html no navegador
+```
+
+`http://localhost:8080` (e a porta 5500, usada pela extensão "Live Server"
+do VS Code) já vêm na lista padrão de `AGNES_ALLOWED_ORIGINS`. Se usar uma
+porta diferente, adicione-a no `.env` e reinicie o backend. Se o log
+mostrar `[Agnes][CORS] Origem 'null' não está em...`, é exatamente esse o
+caso — abra pela URL HTTP, não pelo arquivo.
+
 ## Usando no celular
 
 Tem dois caminhos bem diferentes — escolha o que faz sentido pro seu caso.
@@ -111,7 +153,9 @@ das proteções de HTTPS, funciona mesmo com o app servido por `https://`
 ### Caminho B: celular usando o modelo do PC pela rede
 
 Pra quando você quer o modelo maior do PC, não o pequeno rodando no
-celular.
+celular. Duas variantes — escolha pelo que importa mais pra você agora.
+
+**B1 (mais simples): abrir o app direto do backend do PC, pelo IP da rede**
 
 1. Descubra o IP do PC na rede local: `python find_lan_ip.py`.
 2. No PC, rode o backend aceitando conexões externas — e leia a seção de
@@ -119,19 +163,33 @@ celular.
    ```bash
    uvicorn main:app --host 0.0.0.0 --port 8787
    ```
-3. No `.env` do PC, configure `AGNES_PROVIDER=remote` só se o *modelo*
-   também estiver em outra máquina — se o modelo está no próprio PC junto
-   com este backend, deixe `AGNES_PROVIDER=local` mesmo (o backend é local
-   em relação ao modelo; é o *celular* que está remoto em relação ao
-   *backend*, o que é outra coisa — ver `AGNES_ALLOWED_ORIGINS`).
-4. Inclua a URL do seu GitHub Pages em `AGNES_ALLOWED_ORIGINS` e reinicie.
-5. No celular: bolha ✨ → ⚙ → `http://<IP-DO-PC>:8787`.
+3. No celular (mesma Wi-Fi), abra no navegador:
+   ```
+   http://<IP-DO-PC>:8787/
+   ```
+   Isso carrega o app **e** fala com a API a partir do mesmo endereço —
+   mesma origem, sem CORS envolvido, sem o problema de "conteúdo misto"
+   (é HTTP dos dois lados, não está misturando com uma página HTTPS).
 
-**O problema chato deste caminho:** GitHub Pages serve o app por `https://`,
-e navegadores bloqueiam uma página `https` chamando um endereço `http`
-comum que não seja loopback ("conteúdo misto"). Isso não é uma proteção pra
-desativar de vez — trate como um sinal de que, pra uso além de testes
-rápidos, vale configurar HTTPS de verdade na frente do backend:
+Única desvantagem: esse não é o app instalado via GitHub Pages (sem ícone na
+tela inicial, sem cache offline do service worker) — é só uma sessão de
+navegador enquanto o PC estiver rodando o backend.
+
+**B2: continuar usando o app publicado no GitHub Pages, e só a API no PC**
+
+Se você quer o app "de verdade" (instalado, ícone, offline) e só a
+conversa com a Agnes vindo do PC:
+
+1. Mesmos passos 1 e 2 de cima.
+2. Inclua a URL do seu GitHub Pages em `AGNES_ALLOWED_ORIGINS` e reinicie.
+3. No celular: abra o app publicado normalmente → bolha ✨ → ⚙ →
+   `http://<IP-DO-PC>:8787`.
+
+**O problema chato desta variante (B2):** GitHub Pages serve o app por
+`https://`, e navegadores bloqueiam uma página `https` chamando um endereço
+`http` comum que não seja loopback ("conteúdo misto"). Isso não é uma
+proteção pra desativar de vez — trate como um sinal de que, pra uso além de
+testes rápidos, vale configurar HTTPS de verdade na frente do backend:
 
 - **Testes rápidos, sem pressa de fazer certo**: permita "conteúdo
   inseguro" pra esse site nas configurações do site no Chrome do celular.
@@ -142,9 +200,9 @@ rápidos, vale configurar HTTPS de verdade na frente do backend:
   configuração) ou use uma ferramenta de malha de rede com HTTPS embutido
   (ex: [Tailscale](https://tailscale.com/kb/1153/enabling-https) com
   `tailscale serve`). Isso fica como próximo passo natural quando quiserem
-  deixar o Caminho B estável — não implementei agora pra não adicionar peça
-  nova sem necessidade imediata, mas a arquitetura (backend separado, sem
-  segredo no frontend) já está pronta pra receber isso na frente.
+  deixar a variante B2 estável — não implementei agora pra não adicionar
+  peça nova sem necessidade imediata, mas a arquitetura (backend separado,
+  sem segredo no frontend) já está pronta pra receber isso na frente.
 
 ## Endpoints
 

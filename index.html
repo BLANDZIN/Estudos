@@ -145,14 +145,27 @@ async function extractPdfText(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    let pageText = "";
+    // agrupa os fragmentos de texto em linhas por proximidade vertical, depois
+    // ordena cada linha da esquerda pra direita — mais robusto que só inserir
+    // quebra de linha na ordem em que o PDF entrega os fragmentos, que nem
+    // sempre é a ordem de leitura
+    const items = content.items
+      .filter((it) => it.str !== undefined)
+      .map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5] }));
+    items.sort((a, b) => (b.y - a.y) || (a.x - b.x));
+    const lines = [];
+    let currentLine = [];
     let lastY = null;
-    content.items.forEach((item) => {
-      const y = item.transform[5];
-      if (lastY !== null && Math.abs(y - lastY) > 4) pageText += "\n";
-      pageText += item.str + " ";
-      lastY = y;
-    });
+    for (const it of items) {
+      if (lastY !== null && Math.abs(it.y - lastY) > 3) {
+        lines.push(currentLine);
+        currentLine = [];
+      }
+      currentLine.push(it);
+      lastY = it.y;
+    }
+    if (currentLine.length) lines.push(currentLine);
+    const pageText = lines.map((line) => line.sort((a, b) => a.x - b.x).map((it) => it.str).join(" ")).join("\n");
     full += pageText + "\n\n";
   }
   return full;
@@ -166,10 +179,28 @@ async function extractAnyText(file) {
 }
 
 // ---------- exam / gabarito parsing ----------
-function parseExamText(rawText) {
-  const text = rawText.replace(/\r\n/g, "\n").trim();
-  const splitRegex = /quest[ãa]o\s*0*(\d{1,3})\b[:.\-]?/gi;
-  const matches = [...text.matchAll(splitRegex)];
+function splitIntoQuestionBlocks(text) {
+  // tentativa 1: marcador explícito "Questão N" (mais confiável quando existe)
+  const explicitRegex = /quest[ãa]o\s*0*(\d{1,3})\b[:.\-]?/gi;
+  let matches = [...text.matchAll(explicitRegex)];
+
+  // tentativa 2 (fallback): número solto no início da linha, tipo "01.", "1)", "1 -"
+  // — só aceita se os números formarem uma sequência majoritariamente crescente,
+  // pra não confundir com números de página, datas, itens de alternativa etc.
+  if (matches.length < 2) {
+    const bareRegex = /^\s*0*(\d{1,3})[\.\)\-]\s+(?=\S)/gm;
+    const candidates = [...text.matchAll(bareRegex)];
+    let goodStreak = 0;
+    for (let i = 1; i < candidates.length; i++) {
+      const prev = parseInt(candidates[i - 1][1], 10);
+      const curr = parseInt(candidates[i][1], 10);
+      if (curr === prev + 1) goodStreak++;
+    }
+    if (candidates.length >= 4 && goodStreak >= Math.floor((candidates.length - 1) * 0.6)) {
+      matches = candidates;
+    }
+  }
+
   if (matches.length === 0) return [];
 
   const blocks = [];
@@ -179,21 +210,31 @@ function parseExamText(rawText) {
     const num = parseInt(matches[i][1], 10);
     blocks.push({ num, chunk: text.slice(start, end).trim() });
   }
+  return blocks;
+}
+
+function parseExamText(rawText) {
+  const text = rawText.replace(/\r\n/g, "\n").trim();
+  const blocks = splitIntoQuestionBlocks(text);
+  if (blocks.length === 0) return [];
+
+  // aceita "A)", "(A)", "A.", "A -", em maiúscula ou minúscula
+  const altRegex = /(^|\n)\s*[\(\[]?([A-Ea-e])[\)\.\-\]]\s*(.+?)(?=\n\s*[\(\[]?[A-Ea-e][\)\.\-\]]\s|$)/gs;
 
   return blocks.map(({ num, chunk }) => {
-    const altRegex = /(^|\n)\s*([A-E])[\)\.\-]\s*(.+?)(?=\n\s*[A-E][\)\.\-]\s|$)/gs;
     const alts = {};
     let statementEnd = chunk.length;
     let firstMatch = null;
     for (const m of chunk.matchAll(altRegex)) {
-      const letter = m[2];
+      const letter = m[2].toUpperCase();
       const content = m[3].trim().replace(/\n+/g, " ");
-      alts[letter] = content;
+      if (!alts[letter]) alts[letter] = content;
       if (firstMatch === null) firstMatch = m.index + m[1].length;
     }
     if (firstMatch !== null) statementEnd = firstMatch;
     const statement = chunk.slice(0, statementEnd).trim().replace(/\n+/g, " ");
-    return { num, statement, alternatives: alts, hasAllAlts: LETTERS.every((l) => alts[l]) };
+    const altCount = Object.keys(alts).length;
+    return { num, statement, alternatives: alts, altCount, hasAlts: altCount >= 2 };
   });
 }
 
@@ -326,6 +367,7 @@ function StudyApp() {
   const [questions, setQuestions] = useState([]);
   const [goals, setGoals] = useState([]);
   const [topics, setTopics] = useState([]);
+  const [notes, setNotes] = useState([]);
   const [accent, setAccent] = useState("#E8A33D");
   const [wallpaper, setWallpaper] = useState(null);
   const [appName, setAppName] = useState("Estudos");
@@ -334,6 +376,13 @@ function StudyApp() {
   const [timerSound, setTimerSound] = useState(true);
   const [celebrationEmoji, setCelebrationEmoji] = useState("🔥");
   const [cardStyle, setCardStyle] = useState("rounded");
+  const [agnesBackendUrl, setAgnesBackendUrlState] = useState(() => {
+    try { return localStorage.getItem(AGNES_BACKEND_KEY) || "http://127.0.0.1:8787"; } catch (e) { return "http://127.0.0.1:8787"; }
+  });
+  function setAgnesBackendUrl(url) {
+    setAgnesBackendUrlState(url);
+    try { localStorage.setItem(AGNES_BACKEND_KEY, url); } catch (e) {}
+  }
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // idle | saving | saved | error
   const saveTimer = useRef(null);
@@ -347,6 +396,7 @@ function StudyApp() {
     if (Array.isArray(data.questions)) setQuestions(data.questions);
     if (Array.isArray(data.goals)) setGoals(data.goals);
     if (Array.isArray(data.topics)) setTopics(data.topics);
+    if (Array.isArray(data.notes)) setNotes(data.notes);
     if (data.accent) setAccent(data.accent);
     if (data.wallpaper) setWallpaper(data.wallpaper);
     if (data.appName) setAppName(data.appName);
@@ -381,7 +431,7 @@ function StudyApp() {
 
   // persist on change (debounced), skipping the very first render after load
   const latestStateRef = useRef();
-  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
 
   function flushSaveNow() {
     try {
@@ -409,7 +459,7 @@ function StudyApp() {
       setSyncState(localOk ? "saved" : "error");
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
+  }, [subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
 
   // salvamento de emergência: grava na hora (sem esperar o debounce) assim que a aba é
   // minimizada, trocada ou fechada — evita perder a última alteração feita antes de sair
@@ -428,7 +478,7 @@ function StudyApp() {
 
   // avisa antes de fechar/recarregar se não deu pra salvar localmente
   useEffect(() => {
-    const hasData = subjects.length > 4 || blocks.length > 0 || sessions.length > 0 || questions.length > 0 || goals.length > 0 || topics.length > 0;
+    const hasData = subjects.length > 4 || blocks.length > 0 || sessions.length > 0 || questions.length > 0 || goals.length > 0 || topics.length > 0 || notes.length > 0;
     const unreliable = syncState === "error";
     function handleBeforeUnload(e) {
       if (loaded && hasData && unreliable) {
@@ -438,7 +488,7 @@ function StudyApp() {
     }
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [subjects, blocks, sessions, questions, goals, topics, loaded, syncState]);
+  }, [subjects, blocks, sessions, questions, goals, topics, notes, loaded, syncState]);
 
   function wipeAllData() {
     setSubjects(SEED_SUBJECTS);
@@ -447,6 +497,7 @@ function StudyApp() {
     setQuestions([]);
     setGoals([]);
     setTopics([]);
+    setNotes([]);
     setAccent("#E8A33D");
     setWallpaper(null);
     setAppName("Estudos");
@@ -458,13 +509,13 @@ function StudyApp() {
   }
 
   function exportBackup() {
-    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
+    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
   }
 
   // backup automático opcional: baixa um .json sozinho quando há mudanças, sem substituir o backup manual
   const [autoBackup, setAutoBackup] = useState(false);
   const stateRef = useRef();
-  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
   const lastAutoPayload = useRef(null);
 
   useEffect(() => {
@@ -492,6 +543,7 @@ function StudyApp() {
           if (Array.isArray(data.questions)) setQuestions(data.questions);
           if (Array.isArray(data.goals)) setGoals(data.goals);
           if (Array.isArray(data.topics)) setTopics(data.topics);
+          if (Array.isArray(data.notes)) setNotes(data.notes);
           if (data.accent) setAccent(data.accent);
           if (data.wallpaper !== undefined) setWallpaper(data.wallpaper);
           if (data.appName) setAppName(data.appName);
@@ -549,19 +601,22 @@ function StudyApp() {
           font={font} setFont={setFont} timerSound={timerSound} setTimerSound={setTimerSound}
           celebrationEmoji={celebrationEmoji} setCelebrationEmoji={setCelebrationEmoji}
           cardStyle={cardStyle} setCardStyle={setCardStyle}
+          agnesBackendUrl={agnesBackendUrl} setAgnesBackendUrl={setAgnesBackendUrl}
         />}
         {tab === "guia" && <GuiaEstudos subjects={subjects} setSubjects={setSubjects} topics={topics} setTopics={setTopics} />}
         {tab === "calendario" && <Calendario subjects={subjects} blocks={blocks} sessions={sessions} goals={goals} setGoals={setGoals} />}
         {tab === "cronometro" && <Cronometro subjects={subjects} sessions={sessions} setSessions={setSessions} timerSound={timerSound} />}
         {tab === "sessoes" && <Sessoes subjects={subjects} sessions={sessions} />}
         {tab === "questoes" && <QuestionBank subjects={subjects} questions={questions} setQuestions={setQuestions} setTab={setTab} celebrationEmoji={celebrationEmoji} />}
-        {tab === "importar" && <Importer subjects={subjects} setQuestions={setQuestions} setTab={setTab} />}
+        {tab === "caderno" && <Caderno subjects={subjects} notes={notes} setNotes={setNotes} />}
+        {tab === "importar" && <Importer subjects={subjects} setSubjects={setSubjects} setQuestions={setQuestions} setTab={setTab} />}
       </main>
       </CardStyleContext.Provider>
       <AgnesBubble
         subjects={subjects} blocks={blocks} sessions={sessions} setSessions={setSessions}
         topics={topics} setTopics={setTopics} goals={goals} setGoals={setGoals}
         accent={accent} setTab={setTab}
+        backendUrl={agnesBackendUrl} setBackendUrl={setAgnesBackendUrl}
       />
     </div>
   );
@@ -573,6 +628,7 @@ function Header({ tab, setTab, syncState, appName }) {
     { id: "painel", label: "Painel" },
     { id: "materias", label: "Matérias & Plano" },
     { id: "guia", label: "Guia de Estudos" },
+    { id: "caderno", label: "Caderno" },
     { id: "calendario", label: "Calendário" },
     { id: "cronometro", label: "Cronômetro" },
     { id: "questoes", label: "Questões" },
@@ -587,7 +643,7 @@ function Header({ tab, setTab, syncState, appName }) {
       <div style={{ maxWidth: 720, margin: "0 auto", padding: "14px 16px 0" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
           <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "-0.01em" }}>{appName || "Estudos"}</span>
-          <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>v1.0</span>
+          <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>v1.3</span>
           {syncLabel && <span style={{ fontSize: 11, color: syncColor, marginLeft: "auto" }}>{syncLabel}</span>}
         </div>
         <nav style={{ display: "flex", gap: 4, overflowX: "auto" }}>
@@ -1040,7 +1096,7 @@ function Materias({
   subjects, setSubjects, blocks, setBlocks, sessions, setSessions, questions, setQuestions, goals, setGoals, topics, setTopics,
   accent, setAccent, wallpaper, setWallpaper, onWipe, onExport, onImport, autoBackup, setAutoBackup,
   appName, setAppName, greeting, setGreeting, font, setFont, timerSound, setTimerSound, celebrationEmoji, setCelebrationEmoji,
-  cardStyle, setCardStyle,
+  cardStyle, setCardStyle, agnesBackendUrl, setAgnesBackendUrl,
 }) {
   const [name, setName] = useState("");
   const [color, setColor] = useState(PALETTE[0]);
@@ -1325,6 +1381,8 @@ function Materias({
           <span style={{ fontSize: 13 }}>Tocar som ao terminar o cronômetro</span>
         </label>
       </Card>
+
+      <AgnesSettings backendUrl={agnesBackendUrl} setBackendUrl={setAgnesBackendUrl} />
 
       <Card>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Backup manual</div>
@@ -1867,6 +1925,167 @@ function GuiaEstudos({ subjects, setSubjects, topics, setTopics }) {
   );
 }
 
+// ---------- Caderno de anotações ----------
+const NOTE_COLORS = ["#E8A33D", "#4FB4A8", "#C4677D", "#7C9BC2", "#8FBF5F", "#B58AD9", "#D9A0E0", "#5FA8D3"];
+
+function NoteCard({ note, onSave, onRemove, onTogglePin }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(note.title);
+  const [content, setContent] = useState(note.content);
+  const [color, setColor] = useState(note.color || NOTE_COLORS[0]);
+
+  function save() {
+    onSave(note.id, { title: title.trim() || "Sem título", content, color, updatedAt: new Date().toISOString() });
+    setEditing(false);
+  }
+  function cancel() {
+    setTitle(note.title); setContent(note.content); setColor(note.color || NOTE_COLORS[0]);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: "var(--surface2)", border: `1px solid ${color}`, borderLeft: `4px solid ${color}`, borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título" style={{ ...input, fontWeight: 600 }} />
+        <textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="Sua anotação..." style={{ ...input, minHeight: 90, resize: "vertical", fontFamily: "inherit" }} />
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          {NOTE_COLORS.map((c) => (
+            <button key={c} onClick={() => setColor(c)} style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+          ))}
+          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+          <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+            <button onClick={cancel} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>Cancelar</button>
+            <button onClick={save} style={{ ...primaryBtn, padding: "5px 10px", fontSize: 12 }}>Salvar</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: "var(--surface2)", borderLeft: `4px solid ${note.color || NOTE_COLORS[0]}`, border: "1px solid var(--line)", borderRadius: 8, padding: 10 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 4 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, flex: 1 }}>{note.pinned && "📌 "}{note.title}</div>
+        <button onClick={() => onTogglePin(note.id)} style={iconBtn} aria-label="Fixar/desafixar" title="Fixar">{note.pinned ? "📍" : "📌"}</button>
+        <button onClick={() => setEditing(true)} style={iconBtn} aria-label="Editar">✏️</button>
+        <button onClick={() => onRemove(note.id)} style={iconBtn} aria-label="Excluir">×</button>
+      </div>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{note.content || "(vazio)"}</div>
+    </div>
+  );
+}
+
+function Caderno({ subjects, notes, setNotes }) {
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState({});
+  const [addingFor, setAddingFor] = useState(null);
+  const [newTitle, setNewTitle] = useState("");
+  const [newContent, setNewContent] = useState("");
+  const [newColor, setNewColor] = useState(NOTE_COLORS[0]);
+
+  function toggleCollapsed(id) {
+    setCollapsed((prev) => {
+      const current = prev[id] === undefined ? true : prev[id];
+      return { ...prev, [id]: !current };
+    });
+  }
+
+  function startAdd(subjectId) {
+    setAddingFor(subjectId); setNewTitle(""); setNewContent(""); setNewColor(NOTE_COLORS[Math.floor(Math.random() * NOTE_COLORS.length)]);
+  }
+  function saveNew() {
+    if (!newTitle.trim() && !newContent.trim()) { setAddingFor(null); return; }
+    setNotes((prev) => [{
+      id: uid(), subjectId: addingFor, title: newTitle.trim() || "Sem título", content: newContent,
+      color: newColor, pinned: false, updatedAt: new Date().toISOString(),
+    }, ...prev]);
+    setAddingFor(null);
+  }
+  function updateNote(id, patch) { setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n))); }
+  function removeNote(id) { setNotes((prev) => prev.filter((n) => n.id !== id)); }
+  function togglePin(id) { setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, pinned: !n.pinned } : n))); }
+
+  const searchLower = search.trim().toLowerCase();
+  const isSearching = searchLower.length > 0;
+  function noteMatches(n) {
+    return n.title.toLowerCase().includes(searchLower) || (n.content || "").toLowerCase().includes(searchLower);
+  }
+
+  const visibleSubjects = subjects.filter((s) => {
+    if (!isSearching) return true;
+    return notes.some((n) => n.subjectId === s.id && noteMatches(n));
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 15 }}>🔍</span>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar nas anotações..." style={{ ...input, flex: 1 }} />
+          {isSearching && <button onClick={() => setSearch("")} style={iconBtn} aria-label="Limpar busca">×</button>}
+        </div>
+      </Card>
+
+      {subjects.length === 0 && <Card><EmptyRow text="Cadastre uma matéria primeiro." /></Card>}
+      {isSearching && visibleSubjects.length === 0 && <Card><EmptyRow text={`Nada encontrado para "${search}".`} /></Card>}
+
+      {visibleSubjects.map((s) => {
+        const subjNotesAll = notes.filter((n) => n.subjectId === s.id);
+        const subjNotes = isSearching ? subjNotesAll.filter(noteMatches) : subjNotesAll;
+        const sorted = [...subjNotes].sort((a, b) => (b.pinned - a.pinned) || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+        const isCollapsed = isSearching ? false : (collapsed[s.id] === undefined ? true : collapsed[s.id]);
+
+        return (
+          <Card key={s.id}>
+            <button onClick={() => toggleCollapsed(s.id)} style={{
+              background: "transparent", border: "none", padding: 0, cursor: "pointer", width: "100%",
+              display: "flex", alignItems: "center", gap: 8, marginBottom: isCollapsed ? 0 : 10, minHeight: "auto",
+            }}>
+              <span style={{ fontSize: 11, color: "var(--muted)", width: 12 }}>{isCollapsed ? "▶" : "▼"}</span>
+              <SubjectMark subject={s} size={11} />
+              <span style={{ fontSize: 14, fontWeight: 700, flex: 1, textAlign: "left", color: s.color }}>{s.name}</span>
+              {subjNotesAll.length > 0 && <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{subjNotesAll.length} anotação{subjNotesAll.length === 1 ? "" : "ões"}</span>}
+            </button>
+
+            {!isCollapsed && (
+              <React.Fragment>
+                {sorted.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>Nenhuma anotação ainda nessa matéria.</div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 8, marginBottom: 10 }}>
+                    {sorted.map((n) => (
+                      <NoteCard key={n.id} note={n} onSave={updateNote} onRemove={removeNote} onTogglePin={togglePin} />
+                    ))}
+                  </div>
+                )}
+
+                {addingFor === s.id ? (
+                  <div style={{ background: "var(--surface2)", border: `1px solid ${newColor}`, borderLeft: `4px solid ${newColor}`, borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                    <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Título" style={{ ...input, fontWeight: 600 }} autoFocus />
+                    <textarea value={newContent} onChange={(e) => setNewContent(e.target.value)} placeholder="Sua anotação..." style={{ ...input, minHeight: 90, resize: "vertical", fontFamily: "inherit" }} />
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      {NOTE_COLORS.map((c) => (
+                        <button key={c} onClick={() => setNewColor(c)} style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: newColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+                      ))}
+                      <input type="color" value={newColor} onChange={(e) => setNewColor(e.target.value)} style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+                      <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                        <button onClick={() => setAddingFor(null)} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>Cancelar</button>
+                        <button onClick={saveNew} style={{ ...primaryBtn, padding: "5px 10px", fontSize: 12 }}>Salvar</button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => startAdd(s.id)} style={ghostBtn}>+ Nova anotação</button>
+                )}
+              </React.Fragment>
+            )}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
 // ---------- Cronômetro ----------
 const MODES = [
   { id: "pomodoro", label: "Pomodoro", direction: "down" },
@@ -2110,7 +2329,26 @@ function Sessoes({ subjects, sessions }) {
 }
 
 // ---------- Importer (com upload de PDF) ----------
-function Importer({ subjects, setQuestions, setTab }) {
+const QUESTIONS_JSON_EXAMPLE = `{
+  "questoes": [
+    {
+      "materia": "Matemática",
+      "banca": "ITA 2025",
+      "enunciado": "Texto da questão...",
+      "alternativas": { "A": "...", "B": "...", "C": "...", "D": "...", "E": "..." },
+      "gabarito": "C"
+    },
+    {
+      "materia": "Física",
+      "banca": "ITA 2025",
+      "enunciado": "...",
+      "alternativas": { "A": "...", "B": "...", "C": "...", "D": "..." },
+      "gabarito": "A"
+    }
+  ]
+}`;
+
+function Importer({ subjects, setSubjects, setQuestions, setTab }) {
   const [source, setSource] = useState("");
   const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
   const [examText, setExamText] = useState("");
@@ -2119,8 +2357,16 @@ function Importer({ subjects, setQuestions, setTab }) {
   const [loadingExam, setLoadingExam] = useState(false);
   const [loadingKey, setLoadingKey] = useState(false);
   const [fileError, setFileError] = useState("");
+  const [showRaw, setShowRaw] = useState(false);
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
+  const [rangeSubject, setRangeSubject] = useState(subjects[0]?.id || "");
   const examFileRef = useRef(null);
   const keyFileRef = useRef(null);
+
+  const [jsonText, setJsonText] = useState("");
+  const [jsonMsg, setJsonMsg] = useState("");
+  const [showJsonFormat, setShowJsonFormat] = useState(false);
 
   useEffect(() => { if (!subjectId && subjects[0]) setSubjectId(subjects[0].id); }, [subjects]);
 
@@ -2160,14 +2406,22 @@ function Importer({ subjects, setQuestions, setTab }) {
   function runParse() {
     const parsedQuestions = parseExamText(examText);
     const answerMap = parseAnswerKey(keyText);
-    const merged = parsedQuestions.map((q) => ({ ...q, answer: answerMap[q.num] || null }));
+    const merged = parsedQuestions.map((q) => ({ ...q, answer: answerMap[q.num] || null, subjectId }));
     setPreview(merged);
+    setShowRaw(merged.length === 0);
+  }
+
+  function applyRangeSubject() {
+    const from = parseInt(rangeFrom, 10);
+    const to = parseInt(rangeTo, 10);
+    if (!preview || isNaN(from) || isNaN(to) || !rangeSubject) return;
+    setPreview((prev) => prev.map((q) => (q.num >= from && q.num <= to ? { ...q, subjectId: rangeSubject } : q)));
   }
 
   function confirmImport() {
     if (!preview) return;
-    const toAdd = preview.filter((q) => q.hasAllAlts).map((q) => ({
-      id: uid(), source: source.trim() || "Sem título", subjectId, topic: "",
+    const toAdd = preview.filter((q) => q.hasAlts).map((q) => ({
+      id: uid(), source: source.trim() || "Sem título", subjectId: q.subjectId || subjectId, topic: "",
       statement: q.statement, alternatives: q.alternatives, answer: q.answer,
       difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
     }));
@@ -2176,8 +2430,65 @@ function Importer({ subjects, setQuestions, setTab }) {
     setTab("questoes");
   }
 
-  const okCount = preview ? preview.filter((q) => q.hasAllAlts).length : 0;
-  const withAnswerCount = preview ? preview.filter((q) => q.hasAllAlts && q.answer).length : 0;
+  function mergeQuestionsJson(data) {
+    if (!data || !Array.isArray(data.questoes)) throw new Error("formato inválido");
+    let currentSubjects = subjects;
+    const toAdd = [];
+    data.questoes.forEach((q) => {
+      if (!q || !q.materia || !q.enunciado) return;
+      let subj = currentSubjects.find((s) => s.name.toLowerCase().trim() === String(q.materia).toLowerCase().trim());
+      if (!subj) {
+        subj = { id: uid(), name: String(q.materia).trim(), color: PALETTE[currentSubjects.length % PALETTE.length], icon: null };
+        currentSubjects = [...currentSubjects, subj];
+      }
+      const alts = {};
+      if (q.alternativas && typeof q.alternativas === "object") {
+        Object.entries(q.alternativas).forEach(([k, v]) => { alts[k.toUpperCase()] = String(v); });
+      }
+      toAdd.push({
+        id: uid(), source: (q.banca || "IA").trim(), subjectId: subj.id, topic: "",
+        statement: String(q.enunciado).trim(), alternatives: alts,
+        answer: q.gabarito ? String(q.gabarito).toUpperCase().trim() : null,
+        difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
+      });
+    });
+    setSubjects(currentSubjects);
+    setQuestions((prev) => [...toAdd, ...prev]);
+    return toAdd.length;
+  }
+
+  function importJsonPasted() {
+    try {
+      const data = JSON.parse(jsonText);
+      const count = mergeQuestionsJson(data);
+      setJsonMsg(`${count} questão(ões) importada(s) com sucesso.`);
+      setJsonText("");
+    } catch (e) {
+      setJsonMsg("JSON inválido — confira o formato esperado abaixo.");
+    }
+  }
+
+  async function importJsonFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const count = mergeQuestionsJson(data);
+      setJsonMsg(`${count} questão(ões) importada(s) com sucesso.`);
+    } catch (err) {
+      setJsonMsg("Não consegui ler esse arquivo JSON.");
+    }
+    e.target.value = "";
+  }
+
+  function copyJsonFormat() {
+    if (navigator.clipboard) navigator.clipboard.writeText(QUESTIONS_JSON_EXAMPLE);
+  }
+
+  const okCount = preview ? preview.filter((q) => q.hasAlts).length : 0;
+  const withAnswerCount = preview ? preview.filter((q) => q.hasAlts && q.answer).length : 0;
+  const subjectsUsed = preview ? [...new Set(preview.map((q) => q.subjectId))].map((id) => subjects.find((s) => s.id === id)).filter(Boolean) : [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -2185,7 +2496,9 @@ function Importer({ subjects, setQuestions, setTab }) {
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Importar prova</div>
         <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
           Suba o PDF da prova e o do gabarito (ou cole o texto direto). O sistema extrai o texto do PDF no seu
-          próprio navegador — nada é enviado a um servidor — e estrutura as questões automaticamente.
+          próprio navegador — nada é enviado a um servidor — e estrutura as questões automaticamente. Prova com
+          mais de uma matéria (ou dividida em dias)? Analise primeiro e ajuste a matéria por intervalo de
+          questão na pré-visualização, logo abaixo.
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
@@ -2202,7 +2515,7 @@ function Importer({ subjects, setQuestions, setTab }) {
 
         {fileError && <div style={{ fontSize: 12.5, color: "var(--danger)", marginBottom: 10 }}>{fileError}</div>}
 
-        <details>
+        <details open={showRaw}>
           <summary style={{ fontSize: 12.5, color: "var(--muted)", cursor: "pointer", marginBottom: 8 }}>
             Ver / editar texto extraído (ou colar manualmente)
           </summary>
@@ -2220,24 +2533,69 @@ function Importer({ subjects, setQuestions, setTab }) {
         </div>
       </Card>
 
-      {preview && (
+      {preview && preview.length === 0 && (
+        <Card>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: "var(--danger)" }}>Nenhuma questão encontrada</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            Não consegui reconhecer o padrão de numeração das questões nesse texto. Abra "Ver / editar texto
+            extraído" acima pra conferir como o texto saiu do PDF — se a numeração usa um formato diferente
+            (ex: sem a palavra "questão", ou colada com a alternativa anterior), edite o texto manualmente
+            deixando cada questão como "Questão 01", "Questão 02"... antes de clicar em Analisar de novo.
+          </div>
+        </Card>
+      )}
+
+      {preview && preview.length > 0 && (
         <Card>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Pré-visualização</div>
           <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
-            {preview.length} questões encontradas · {okCount} com as 5 alternativas completas · {withAnswerCount} com gabarito cruzado
+            {preview.length} questões encontradas · {okCount} com alternativas reconhecidas · {withAnswerCount} com gabarito cruzado
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
-            {preview.map((q) => (
-              <div key={q.num} style={{ border: "1px solid var(--line)", borderRadius: 6, padding: "8px 10px", fontSize: 12.5, background: q.hasAllAlts ? "var(--surface2)" : "transparent" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                  <span style={{ fontWeight: 600 }}>Questão {q.num}</span>
-                  <span style={{ color: q.hasAllAlts ? "var(--ok)" : "var(--danger)", fontFamily: "'JetBrains Mono', monospace" }}>
-                    {q.hasAllAlts ? (q.answer ? `gabarito: ${q.answer}` : "sem gabarito") : "alternativas incompletas"}
-                  </span>
-                </div>
-                <div style={{ color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.statement || "(sem enunciado detectado)"}</div>
+
+          {subjects.length > 1 && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+                Prova com mais de uma matéria? Atribua um intervalo de questões por vez:
               </div>
-            ))}
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>Da questão</span>
+                <input type="number" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} style={{ ...input, width: 64 }} />
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>até</span>
+                <input type="number" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} style={{ ...input, width: 64 }} />
+                <select value={rangeSubject} onChange={(e) => setRangeSubject(e.target.value)} style={input}>
+                  {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <button onClick={applyRangeSubject} style={ghostBtn}>Aplicar</button>
+              </div>
+              {subjectsUsed.length > 0 && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                  {subjectsUsed.map((s) => (
+                    <span key={s.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--muted)" }}>
+                      <SubjectMark subject={s} size={6} /> {s.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+            {preview.map((q) => {
+              const subj = subjects.find((s) => s.id === q.subjectId);
+              return (
+                <div key={q.num} style={{ border: "1px solid var(--line)", borderRadius: 6, padding: "8px 10px", fontSize: 12.5, background: q.hasAlts ? "var(--surface2)" : "transparent" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+                      Questão {q.num} {subjects.length > 1 && subj && <SubjectMark subject={subj} size={6} />}
+                    </span>
+                    <span style={{ color: q.hasAlts ? "var(--ok)" : "var(--danger)", fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 }}>
+                      {q.hasAlts ? (q.answer ? `gabarito: ${q.answer} · ${q.altCount} alts` : `sem gabarito · ${q.altCount} alts`) : "alternativas não reconhecidas"}
+                    </span>
+                  </div>
+                  <div style={{ color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.statement || "(sem enunciado detectado)"}</div>
+                </div>
+              );
+            })}
           </div>
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
             <button onClick={confirmImport} style={primaryBtn} disabled={okCount === 0}>Adicionar {okCount} questões ao banco</button>
@@ -2245,6 +2603,34 @@ function Importer({ subjects, setQuestions, setTab }) {
           </div>
         </Card>
       )}
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Importar questões via JSON</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+          Peça pra uma IA gerar questões nesse formato (útil pra puxar questões de bancas específicas, gerar
+          questões novas de treino, ou colar algo que você já tem estruturado) — cole ou suba o arquivo aqui.
+          Matérias novas são criadas automaticamente, cada questão pode ter sua própria matéria e banca.
+        </div>
+        <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} placeholder="Cole aqui o JSON gerado pela IA..."
+          style={{ ...input, width: "100%", height: 100, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical", marginBottom: 8 }} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <button onClick={importJsonPasted} style={primaryBtn} disabled={!jsonText.trim()}>Importar texto colado</button>
+          <label style={{ ...ghostBtn, display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+            Importar arquivo .json
+            <input type="file" accept=".json" onChange={importJsonFile} style={{ display: "none" }} />
+          </label>
+        </div>
+        {jsonMsg && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{jsonMsg}</div>}
+        <button onClick={() => setShowJsonFormat((v) => !v)} style={{ ...ghostBtn, fontSize: 11.5, padding: "4px 8px" }}>
+          {showJsonFormat ? "Ocultar formato esperado" : "Ver formato esperado"}
+        </button>
+        {showJsonFormat && (
+          <div style={{ marginTop: 8 }}>
+            <pre style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, padding: 10, fontSize: 11, overflowX: "auto", fontFamily: "'JetBrains Mono', monospace" }}>{QUESTIONS_JSON_EXAMPLE}</pre>
+            <button onClick={copyJsonFormat} style={{ ...ghostBtn, fontSize: 11.5, padding: "4px 8px", marginTop: 6 }}>Copiar formato (pra colar no prompt da IA)</button>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -2265,12 +2651,29 @@ function FileDrop({ label, onFile, inputRef, loading, hasContent }) {
 }
 
 // ---------- Question bank + practice ----------
+function questionAccuracy(qs) {
+  const totalAttempts = qs.reduce((a, q) => a + (q.attempts || 0), 0);
+  const totalErrors = qs.reduce((a, q) => a + (q.errors || 0), 0);
+  const pct = totalAttempts > 0 ? Math.round(((totalAttempts - totalErrors) / totalAttempts) * 100) : null;
+  return { totalAttempts, pct };
+}
+
 function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEmoji }) {
   const [filterSubject, setFilterSubject] = useState("all");
+  const [filterBanca, setFilterBanca] = useState("all");
   const [manualOpen, setManualOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   const [practiceQueue, setPracticeQueue] = useState(null);
 
-  const filtered = questions.filter((q) => filterSubject === "all" || q.subjectId === filterSubject);
+  const bancas = useMemo(() => {
+    const set = new Set(questions.map((q) => (q.source || "").trim()).filter(Boolean));
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [questions]);
+
+  const filtered = questions.filter((q) =>
+    (filterSubject === "all" || q.subjectId === filterSubject) &&
+    (filterBanca === "all" || (q.source || "").trim() === filterBanca)
+  );
 
   function startPractice(count) {
     const pool = filtered.filter((q) => q.answer);
@@ -2293,15 +2696,80 @@ function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEm
   if (practiceQueue) return <Practice questions={questions} queue={practiceQueue} onAnswer={recordAnswer} onExit={() => setPracticeQueue(null)} celebrationEmoji={celebrationEmoji} />;
   if (questions.length === 0) return <Card><EmptyRow text="Nenhuma questão no banco ainda." action="Importar prova" onAction={() => setTab("importar")} /></Card>;
 
+  const overall = questionAccuracy(questions);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Card>
+        <button onClick={() => setStatsOpen((v) => !v)} style={{
+          background: "transparent", border: "none", padding: 0, cursor: "pointer", width: "100%",
+          display: "flex", alignItems: "center", gap: 8, minHeight: "auto",
+        }}>
+          <span style={{ fontSize: 11, color: "var(--muted)", width: 12 }}>{statsOpen ? "▼" : "▶"}</span>
+          <span style={{ fontSize: 13, fontWeight: 600, flex: 1, textAlign: "left" }}>📊 Contador de questões · {questions.length}</span>
+          {overall.pct !== null && <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>{overall.pct}% acerto</span>}
+        </button>
+        {statsOpen && (
+          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>
+              {questions.length} questões · {overall.totalAttempts} tentativas no total
+              {overall.pct !== null && ` · ${overall.pct}% de acerto geral`}
+            </div>
+            <div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>Por matéria</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {subjects.map((s) => {
+                  const qs = questions.filter((q) => q.subjectId === s.id);
+                  if (qs.length === 0) return null;
+                  const acc = questionAccuracy(qs);
+                  return (
+                    <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                      <SubjectMark subject={s} size={7} />
+                      <span style={{ flex: 1 }}>{s.name}</span>
+                      <span style={{ color: "var(--muted)" }}>{qs.length} questões</span>
+                      {acc.pct !== null && <span style={{ color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace", width: 42, textAlign: "right" }}>{acc.pct}%</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            {bancas.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>Por banca</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {bancas.map((b) => {
+                    const qs = questions.filter((q) => (q.source || "").trim() === b);
+                    const acc = questionAccuracy(qs);
+                    return (
+                      <div key={b} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                        <span style={{ flex: 1 }}>{b}</span>
+                        <span style={{ color: "var(--muted)" }}>{qs.length} questões</span>
+                        {acc.pct !== null && <span style={{ color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace", width: 42, textAlign: "right" }}>{acc.pct}%</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>Banco de questões · {filtered.length}</div>
-          <select value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)} style={input}>
-            <option value="all">Todas as matérias</option>
-            {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)} style={input}>
+              <option value="all">Todas as matérias</option>
+              {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            {bancas.length > 0 && (
+              <select value={filterBanca} onChange={(e) => setFilterBanca(e.target.value)} style={input}>
+                <option value="all">Todas as bancas</option>
+                {bancas.map((b) => <option key={b} value={b}>{b}</option>)}
+              </select>
+            )}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => startPractice(5)} style={primaryBtn} disabled={filtered.filter((q) => q.answer).length === 0}>Praticar 5</button>
@@ -2443,25 +2911,132 @@ function formatRP(text) {
   });
 }
 
-function AgnesBubble({ subjects, blocks, sessions, setSessions, topics, setTopics, goals, setGoals, accent, setTab }) {
+function AgnesSettings({ backendUrl, setBackendUrl }) {
+  const [testStatus, setTestStatus] = useState(null); // null | "testing" | "ok" | "error"
+  const [testMsg, setTestMsg] = useState("");
+  const [config, setConfig] = useState(null);
+  const [models, setModels] = useState(null);
+  const [modelsStatus, setModelsStatus] = useState(null); // null | "loading" | "ok" | "error"
+  const [modelsMsg, setModelsMsg] = useState("");
+
+  function friendlyNetworkError(err) {
+    return err instanceof TypeError ? `Não consegui alcançar ${backendUrl}. O backend está rodando?` : err.message;
+  }
+
+  async function testConnection() {
+    setTestStatus("testing"); setTestMsg(""); setConfig(null);
+    try {
+      const base = backendUrl.replace(/\/$/, "");
+      const res = await fetch(`${base}/health`);
+      if (!res.ok) throw new Error(`Erro ${res.status} em /health`);
+      const health = await res.json();
+      const cfgRes = await fetch(`${base}/config`);
+      setConfig(cfgRes.ok ? await cfgRes.json() : null);
+      setTestStatus("ok");
+      setTestMsg(`Conectado — provedor: ${health.provider}`);
+    } catch (err) {
+      setTestStatus("error");
+      setTestMsg(friendlyNetworkError(err));
+    }
+  }
+
+  async function findModels() {
+    setModelsStatus("loading"); setModelsMsg(""); setModels(null);
+    try {
+      const base = backendUrl.replace(/\/$/, "");
+      const res = await fetch(`${base}/models`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error((body && body.detail) || `Erro ${res.status}`);
+      }
+      setModels(await res.json());
+      setModelsStatus("ok");
+    } catch (err) {
+      setModelsStatus("error");
+      setModelsMsg(friendlyNetworkError(err));
+    }
+  }
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>✨ Agnes — companheira de estudos</div>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+        Configura a conexão com o backend local da Agnes. O modelo em si (Ollama, llama.cpp, API na nuvem...)
+        é escolhido no <code>.env</code> do backend — aqui você só aponta pra ele e confere se está tudo certo,
+        sem precisar abrir o terminal.
+      </div>
+
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Endereço do backend</div>
+        <input value={backendUrl} onChange={(e) => setBackendUrl(e.target.value)} placeholder="http://127.0.0.1:8787" style={{ ...input, width: "100%" }} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <button onClick={testConnection} style={primaryBtn} disabled={testStatus === "testing"}>
+          {testStatus === "testing" ? "Testando..." : "Testar conexão"}
+        </button>
+        <button onClick={findModels} style={ghostBtn} disabled={modelsStatus === "loading"}>
+          {modelsStatus === "loading" ? "Buscando..." : "Buscar modelos disponíveis"}
+        </button>
+      </div>
+
+      {testStatus && (
+        <div style={{ fontSize: 12.5, color: testStatus === "ok" ? "var(--ok)" : testStatus === "error" ? "var(--danger)" : "var(--muted)", marginBottom: 8 }}>
+          {testMsg}
+        </div>
+      )}
+
+      {config && (
+        <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, fontSize: 12, marginBottom: 10, fontFamily: "'JetBrains Mono', monospace", display: "flex", flexDirection: "column", gap: 2 }}>
+          <div>provedor: {config.provider}</div>
+          <div>flavor: {config.flavor}</div>
+          <div>modelo configurado: {config.model}</div>
+          <div>endpoint do modelo: {config.base_url}</div>
+        </div>
+      )}
+
+      {modelsStatus === "error" && <div style={{ fontSize: 12.5, color: "var(--danger)", marginBottom: 8 }}>{modelsMsg}</div>}
+
+      {models && (
+        <div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+            Modelos encontrados no servidor {models.models.length === 0 ? "(nenhum)" : `(${models.models.length})`}:
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {models.models.map((m) => (
+              <div key={m} style={{
+                display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "4px 8px", borderRadius: 6,
+                background: m === models.current_model ? "var(--accent)22" : "transparent",
+                border: `1px solid ${m === models.current_model ? "var(--accent)" : "var(--line)"}`,
+              }}>
+                <span style={{ flex: 1, fontFamily: "'JetBrains Mono', monospace" }}>{m}</span>
+                {m === models.current_model && <span style={{ fontSize: 10.5, color: "var(--accent)" }}>em uso</span>}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
+            Pra usar outro (que não o "em uso"), ajuste AGNES_LLM_MODEL no .env do backend com o nome
+            exatamente como aparece na lista, e reinicie o backend.
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function AgnesBubble({ subjects, blocks, sessions, setSessions, topics, setTopics, goals, setGoals, accent, setTab, backendUrl, setBackendUrl }) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([
     { role: "agnes", text: "*acena* Oi! Sou a Agnes. Pode me chamar se quiser conversar ou se eu puder ajudar com alguma coisa por aqui." },
   ]);
   const [inputText, setInputText] = useState("");
   const [sending, setSending] = useState(false);
-  const [backendUrl, setBackendUrl] = useState(() => localStorage.getItem(AGNES_BACKEND_KEY) || "http://127.0.0.1:8787");
   const [showSettings, setShowSettings] = useState(false);
   const listRef = useRef(null);
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, open]);
-
-  function saveBackendUrl(url) {
-    setBackendUrl(url);
-    try { localStorage.setItem(AGNES_BACKEND_KEY, url); } catch (e) {}
-  }
 
   function buildAppContext() {
     const today = new Date().getDay();
@@ -2576,10 +3151,11 @@ function AgnesBubble({ subjects, blocks, sessions, setSessions, topics, setTopic
         setMessages((prev) => [...prev, { role: "agnes", text: `*coça a cabeça* Tentei fazer uma coisa mas deu ruim: ${data.action_error}` }]);
       }
     } catch (err) {
-      setMessages((prev) => [...prev, {
-        role: "agnes",
-        text: `*franze a testa* Não consegui falar com meu backend local em ${backendUrl}. Ele está rodando? (veja backend/README.md)`,
-      }]);
+      const isNetworkFailure = err instanceof TypeError; // fetch não conseguiu nem completar a requisição
+      const text = isNetworkFailure
+        ? `*franze a testa* Não consegui alcançar ${backendUrl}. O backend está rodando? (veja backend/README.md)`
+        : `*coça a cabeça* O backend respondeu com um erro: ${err.message}`;
+      setMessages((prev) => [...prev, { role: "agnes", text }]);
     } finally {
       setSending(false);
     }
@@ -2615,7 +3191,7 @@ function AgnesBubble({ subjects, blocks, sessions, setSessions, topics, setTopic
           {showSettings && (
             <div style={{ padding: 10, borderBottom: "1px solid var(--line)", background: "var(--surface2)" }}>
               <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Endereço do backend local</div>
-              <input value={backendUrl} onChange={(e) => saveBackendUrl(e.target.value)} style={{ ...input, width: "100%", fontSize: 12 }} />
+              <input value={backendUrl} onChange={(e) => setBackendUrl(e.target.value)} style={{ ...input, width: "100%", fontSize: 12 }} />
             </div>
           )}
 

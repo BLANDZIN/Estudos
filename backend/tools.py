@@ -63,7 +63,7 @@ def _validate_select_subject(args: dict) -> dict:
 
 def _validate_open_screen(args: dict) -> dict:
     screen = args.get("screen")
-    allowed = {"painel", "materias", "guia", "calendario", "cronometro", "sessoes", "questoes", "importar"}
+    allowed = {"painel", "materias", "guia", "caderno", "calendario", "cronometro", "sessoes", "questoes", "importar"}
     if screen not in allowed:
         raise ToolValidationError(f"screen precisa ser um de: {sorted(allowed)}")
     return {"screen": screen}
@@ -148,7 +148,7 @@ def tool_descriptions_for_prompt() -> str:
         "- pause_timer()\n"
         "- stop_timer()\n"
         "- select_subject(subject_name)\n"
-        "- open_screen(screen)  # painel|materias|guia|calendario|cronometro|sessoes|questoes|importar\n"
+        "- open_screen(screen)  # painel|materias|guia|caderno|calendario|cronometro|sessoes|questoes|importar\n"
         "- get_today_schedule()\n"
         "- get_study_progress(subject_name?)\n"
         "- record_study_progress(subject_name, topic_name, status)  # nao_estudado|estudando|revisando|duvida|dominado\n"

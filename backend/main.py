@@ -22,13 +22,16 @@ Rodar aceitando conexões de outros dispositivos da rede — leia a seção
 import os
 import re
 import json
+from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import memory
@@ -39,23 +42,39 @@ from ai_provider import get_provider
 app = FastAPI(title="Agnes backend", version="0.1.0")
 
 _default_origins = "http://localhost:5500,http://127.0.0.1:5500,http://localhost:8080,http://127.0.0.1:8080"
-allowed_origins = os.getenv("AGNES_ALLOWED_ORIGINS", _default_origins).split(",")
+allowed_origins = [o.strip() for o in os.getenv("AGNES_ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in allowed_origins if o.strip()],
+    allow_origins=allowed_origins,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def _log_cors_mismatch(request, call_next):
+    """Só diagnóstico — não muda em nada a decisão de CORS (isso continua
+    100% a cargo do CORSMiddleware). Ajuda a enxergar rápido, no terminal,
+    quando uma origem não está na allowlist, em vez de adivinhar."""
+    origin = request.headers.get("origin")
+    if origin and origin not in allowed_origins:
+        print(f"[Agnes][CORS] Origem '{origin}' não está em AGNES_ALLOWED_ORIGINS {allowed_origins} — o navegador vai bloquear esta requisição.")
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def _print_startup_hint():
     provider_kind = os.getenv("AGNES_PROVIDER", "local")
+    port = os.getenv("AGNES_PORT", "8787")
     print(f"\n[Agnes] Backend no ar. Provedor de IA configurado: {provider_kind}.")
-    print("[Agnes] Rodando neste dispositivo? Configure a Agnes (⚙ no app) com http://127.0.0.1:<porta>.")
-    print("[Agnes] Acessando de outro aparelho da rede? Veja a seção 'Segurança de rede' e 'Usando de outro")
-    print("[Agnes] dispositivo' no README.md antes de expor esta porta — 0.0.0.0 NÃO é garantia de segurança.\n")
+    print(f"[Agnes] Origens permitidas via CORS (AGNES_ALLOWED_ORIGINS): {allowed_origins}")
+    if (_FRONTEND_DIR / "index.html").exists():
+        print(f"[Agnes] App também disponível direto neste backend: http://127.0.0.1:{port}/")
+        print(f"[Agnes]   (mesma origem do /chat — sem CORS envolvido; ideal pra uso no PC ou no")
+        print(f"[Agnes]   celular pela mesma rede, trocando 127.0.0.1 pelo IP do PC)")
+    print("[Agnes] Acessando de outro aparelho da rede? Veja a seção 'Segurança de rede' no README.md")
+    print("[Agnes] antes de expor esta porta — 0.0.0.0 NÃO é garantia de segurança.\n")
 
 provider = get_provider()
 
@@ -169,3 +188,76 @@ def delete_memory(fact_id: int):
 @app.get("/health")
 def health():
     return {"ok": True, "provider": type(provider).__name__}
+
+
+@app.get("/config")
+def get_config():
+    """Config segura pra mostrar na área de configuração da Agnes no app —
+    NUNCA inclui AGNES_API_KEY nem qualquer outro segredo."""
+    return {
+        "provider": type(provider).__name__,
+        "flavor": getattr(provider, "flavor", None),
+        "model": getattr(provider, "model", None),
+        "base_url": getattr(provider, "base_url", None),
+    }
+
+
+@app.get("/models")
+async def list_models():
+    """Consulta o próprio servidor de modelo configurado (Ollama /api/tags,
+    ou /v1/models pra servidores compatíveis com OpenAI) e devolve os nomes
+    disponíveis — pra você conferir/escolher o AGNES_LLM_MODEL certo no
+    .env, em vez de adivinhar (foi exatamente um nome errado que causou o
+    404 anterior)."""
+    base_url = getattr(provider, "base_url", None)
+    flavor = getattr(provider, "flavor", None)
+    if not base_url:
+        raise HTTPException(400, "O provedor atual não tem uma base_url pra consultar.")
+
+    headers = {}
+    api_key = getattr(provider, "api_key", None)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if flavor == "ollama":
+                resp = await client.get(f"{base_url.rstrip('/')}/api/tags", headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                names = [m.get("name") for m in data.get("models", [])]
+            else:
+                resp = await client.get(f"{base_url.rstrip('/')}/v1/models", headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                names = [m.get("id") for m in data.get("data", [])]
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"O servidor de modelo respondeu {e.response.status_code} ao listar modelos.")
+    except httpx.ConnectError:
+        raise HTTPException(503, f"Não consegui alcançar {base_url} pra listar modelos. Ele está rodando?")
+    except Exception as e:
+        raise HTTPException(502, f"Não consegui interpretar a resposta do servidor de modelo ({e}).")
+
+    return {"models": [n for n in names if n], "current_model": getattr(provider, "model", None)}
+
+
+# ---------------------------------------------------------------------------
+# Serve o frontend (index.html, manifest.json, sw.js, ícones) a partir deste
+# mesmo processo — precisa vir DEPOIS de todas as rotas de API acima, senão
+# o mount "engole" os caminhos antes deles chegarem nas rotas certas.
+#
+# Por que isso ajuda: abrindo http://<este-host>:8787/ (em vez de abrir o
+# index.html como arquivo, ou de um servidor HTTP separado), o app e a API
+# ficam na MESMA origem — o navegador nem dispara o preflight de CORS pra
+# chamadas a /chat, /health etc. Isso evita de vez o problema do `file://`
+# mandando "Origin: null". Funciona igual se você abrir esse endereço do
+# celular, trocando 127.0.0.1 pelo IP do PC na rede (ver README.md).
+#
+# O app publicado no GitHub Pages continua funcionando do jeito de sempre,
+# como uma origem diferente já autorizada em AGNES_ALLOWED_ORIGINS — isso
+# aqui é um caminho A MAIS, não uma substituição.
+# ---------------------------------------------------------------------------
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent
+if (_FRONTEND_DIR / "index.html").exists():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+
