@@ -29,6 +29,7 @@
   button { min-height: 38px; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #2B3440; border-radius: 4px; }
+  [contenteditable][data-placeholder]:empty:before { content: attr(data-placeholder); color: #8A96A3; pointer-events: none; }
   @media (min-width: 860px) {
     .app-main { padding-top: 28px !important; }
   }
@@ -181,7 +182,8 @@ async function extractAnyText(file) {
 // ---------- exam / gabarito parsing ----------
 function splitIntoQuestionBlocks(text) {
   // tentativa 1: marcador explícito "Questão N" (mais confiável quando existe)
-  const explicitRegex = /quest[ãa]o\s*0*(\d{1,3})\b[:.\-]?/gi;
+  // tolerante a extração quebrada do PDF ("Quest ˜ao", "Questo", "QUESTÃO" etc. — o "a" é opcional)
+  const explicitRegex = /quest\s*[^a-z0-9]{0,6}\s*a?\s*o\s*0*(\d{1,3})\b[:.\-]?/gi;
   let matches = [...text.matchAll(explicitRegex)];
 
   // tentativa 2 (fallback): número solto no início da linha, tipo "01.", "1)", "1 -"
@@ -204,10 +206,17 @@ function splitIntoQuestionBlocks(text) {
   if (matches.length === 0) return [];
 
   const blocks = [];
+  const seenNums = new Set();
+  let lastNum = 0;
   for (let i = 0; i < matches.length; i++) {
     const start = matches[i].index + matches[i][0].length;
     const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
-    const num = parseInt(matches[i][1], 10);
+    let num = parseInt(matches[i][1], 10);
+    // extração do PDF às vezes troca um número (ex: 33 lido como 3) — se duplicar,
+    // assume sequência (último + 1) em vez de repetir
+    if (seenNums.has(num)) num = lastNum + 1;
+    seenNums.add(num);
+    lastNum = num;
     blocks.push({ num, chunk: text.slice(start, end).trim() });
   }
   return blocks;
@@ -218,8 +227,11 @@ function parseExamText(rawText) {
   const blocks = splitIntoQuestionBlocks(text);
   if (blocks.length === 0) return [];
 
-  // aceita "A)", "(A)", "A.", "A -", em maiúscula ou minúscula
-  const altRegex = /(^|\n)\s*[\(\[]?([A-Ea-e])[\)\.\-\]]\s*(.+?)(?=\n\s*[\(\[]?[A-Ea-e][\)\.\-\]]\s|$)/gs;
+  // aceita "A)", "(A)", "A.", "A -", "A ( )" (ITA usa "A ( ) texto"), em maiúscula ou minúscula
+  // o delimitador pode ser: ")" "." "-" "]" OU um grupo "( )" / "()" após a letra
+  const altRegex = /(^|\n)\s*[\(\[]?([A-Ea-e])(?:[\)\.\-\]]|\s*\(\s*[Xx]?\s*\))\s*(.+?)(?=\n\s*[\(\[]?[A-Ea-e](?:[\)\.\-\]]|\s*\(\s*[Xx]?\s*\))\s*|$)/gs;
+  // fallback: alternativas todas na mesma linha ("A ( ) ... B ( ) ...") — comum no ITA
+  const inlineAltRegex = /(?:^|\s)([A-Ea-e])\s*\(\s*\)\s*(.+?)(?=\s+[A-Ea-e]\s*\(\s*\)\s*|$)/gs;
 
   return blocks.map(({ num, chunk }) => {
     const alts = {};
@@ -231,6 +243,15 @@ function parseExamText(rawText) {
       if (!alts[letter]) alts[letter] = content;
       if (firstMatch === null) firstMatch = m.index + m[1].length;
     }
+    // se não achou por linha, tenta o formato inline (todas as alternativas na mesma linha)
+    if (Object.keys(alts).length < 2) {
+      for (const m of chunk.matchAll(inlineAltRegex)) {
+        const letter = m[1].toUpperCase();
+        const content = m[2].trim().replace(/\n+/g, " ");
+        if (!alts[letter]) alts[letter] = content;
+        if (firstMatch === null) firstMatch = m.index;
+      }
+    }
     if (firstMatch !== null) statementEnd = firstMatch;
     const statement = chunk.slice(0, statementEnd).trim().replace(/\n+/g, " ");
     const altCount = Object.keys(alts).length;
@@ -240,10 +261,34 @@ function parseExamText(rawText) {
 
 function parseAnswerKey(rawText) {
   const text = rawText.replace(/\r\n/g, "\n").trim();
-  const lineRegex = /0*(\d{1,3})\s*[-–\).:]?\s*([A-E])\b/gi;
+  
+  // Padrões comuns de gabarito:
+  // 01 - C, 01: C, 01) C, 01. C, 01 C
+  // Questão 01: C, Q01 C, 1-C, etc.
+  const patterns = [
+    /0*(\d{1,3})\s*[-–\).:]?\s*([A-E])\b/gi,           // 01 - C, 01: C, 01) C, 01. C, 01 C
+    /quest[ãa]o\s*0*(\d{1,3})\b[^A-E]*([A-E])\b/gi,    // Questão 01: C
+    /q\s*0*(\d{1,3})\b[^A-E]*([A-E])\b/gi,             // Q01 C, q 01: C
+    /^\s*0*(\d{1,3})\s+([A-E])\s*$/gim,                // linha com só "01 C"
+  ];
+  
   const map = {};
-  for (const m of text.matchAll(lineRegex)) map[parseInt(m[1], 10)] = m[2].toUpperCase();
+  for (const regex of patterns) {
+    for (const m of text.matchAll(regex)) {
+      const num = parseInt(m[1], 10);
+      const letter = m[2].toUpperCase();
+      if (!map[num]) map[num] = letter; // primeiro match vence
+    }
+  }
   return map;
+}
+
+// Detecta automaticamente qual matéria cada questão pertence baseado no gabarito
+// (útil quando a prova não diz explicitamente a matéria de cada questão)
+function detectSubjectsFromAnswerKey(answerMap, subjects) {
+  // Por enquanto retorna null - pode ser expandido no futuro
+  // A ideia seria usar o gabarito + conhecimento prévio de bancas
+  return null;
 }
 
 // ---------- metas: projeção de horas ----------
@@ -383,10 +428,15 @@ function StudyApp() {
     setAgnesBackendUrlState(url);
     try { localStorage.setItem(AGNES_BACKEND_KEY, url); } catch (e) {}
   }
+  // Provas salvas (com PDFs originais para visualização + anotações)
+  const [savedExams, setSavedExams] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // idle | saving | saved | error
   const saveTimer = useRef(null);
   const firstSaveSkipped = useRef(false);
+  // status ao vivo do cronômetro (o componente fica montado mesmo em outras abas
+  // pra contagem não parar — o Header lê daqui pra mostrar a pílula ⏱)
+  const timerStatusRef = useRef({ running: false, text: "", subject: "" });
 
   function applyLoadedData(data) {
     if (!data || typeof data !== "object") return;
@@ -397,6 +447,7 @@ function StudyApp() {
     if (Array.isArray(data.goals)) setGoals(data.goals);
     if (Array.isArray(data.topics)) setTopics(data.topics);
     if (Array.isArray(data.notes)) setNotes(data.notes);
+    if (Array.isArray(data.savedExams)) setSavedExams(data.savedExams);
     if (data.accent) setAccent(data.accent);
     if (data.wallpaper) setWallpaper(data.wallpaper);
     if (data.appName) setAppName(data.appName);
@@ -431,7 +482,7 @@ function StudyApp() {
 
   // persist on change (debounced), skipping the very first render after load
   const latestStateRef = useRef();
-  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
 
   function flushSaveNow() {
     try {
@@ -459,7 +510,7 @@ function StudyApp() {
       setSyncState(localOk ? "saved" : "error");
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
+  }, [subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
 
   // salvamento de emergência: grava na hora (sem esperar o debounce) assim que a aba é
   // minimizada, trocada ou fechada — evita perder a última alteração feita antes de sair
@@ -509,13 +560,13 @@ function StudyApp() {
   }
 
   function exportBackup() {
-    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
+    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
   }
 
   // backup automático opcional: baixa um .json sozinho quando há mudanças, sem substituir o backup manual
   const [autoBackup, setAutoBackup] = useState(false);
   const stateRef = useRef();
-  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
   const lastAutoPayload = useRef(null);
 
   useEffect(() => {
@@ -544,6 +595,7 @@ function StudyApp() {
           if (Array.isArray(data.goals)) setGoals(data.goals);
           if (Array.isArray(data.topics)) setTopics(data.topics);
           if (Array.isArray(data.notes)) setNotes(data.notes);
+          if (Array.isArray(data.savedExams)) setSavedExams(data.savedExams);
           if (data.accent) setAccent(data.accent);
           if (data.wallpaper !== undefined) setWallpaper(data.wallpaper);
           if (data.appName) setAppName(data.appName);
@@ -586,7 +638,7 @@ function StudyApp() {
         ? { backgroundImage: wallpaper.value }
         : {}),
     }}>
-      <Header tab={tab} setTab={setTab} syncState={syncState} appName={appName} />
+      <Header tab={tab} setTab={setTab} syncState={syncState} appName={appName} timerStatusRef={timerStatusRef} />
       <CardStyleContext.Provider value={cardStyle}>
       <main className="app-main" style={{ flex: 1, padding: "20px 16px 40px", maxWidth: 720, margin: "0 auto", width: "100%" }}>
         {tab === "painel" && <Painel subjects={subjects} blocks={blocks} sessions={sessions} topics={topics} setTopics={setTopics} setTab={setTab} greeting={greeting} />}
@@ -605,11 +657,14 @@ function StudyApp() {
         />}
         {tab === "guia" && <GuiaEstudos subjects={subjects} setSubjects={setSubjects} topics={topics} setTopics={setTopics} />}
         {tab === "calendario" && <Calendario subjects={subjects} blocks={blocks} sessions={sessions} goals={goals} setGoals={setGoals} />}
-        {tab === "cronometro" && <Cronometro subjects={subjects} sessions={sessions} setSessions={setSessions} timerSound={timerSound} />}
+        <div style={{ display: tab === "cronometro" ? "" : "none" }}>
+          <Cronometro subjects={subjects} sessions={sessions} setSessions={setSessions} timerSound={timerSound} statusRef={timerStatusRef} />
+        </div>
         {tab === "sessoes" && <Sessoes subjects={subjects} sessions={sessions} />}
         {tab === "questoes" && <QuestionBank subjects={subjects} questions={questions} setQuestions={setQuestions} setTab={setTab} celebrationEmoji={celebrationEmoji} />}
+        {tab === "provas" && <SavedExams exams={savedExams} setExams={setSavedExams} subjects={subjects} />}
         {tab === "caderno" && <Caderno subjects={subjects} notes={notes} setNotes={setNotes} />}
-        {tab === "importar" && <Importer subjects={subjects} setSubjects={setSubjects} setQuestions={setQuestions} setTab={setTab} />}
+        {tab === "importar" && <Importer subjects={subjects} setSubjects={setSubjects} setQuestions={setQuestions} setTab={setTab} savedExams={savedExams} setSavedExams={setSavedExams} />}
       </main>
       </CardStyleContext.Provider>
       <AgnesBubble
@@ -623,7 +678,24 @@ function StudyApp() {
 }
 
 // ---------- header / nav ----------
-function Header({ tab, setTab, syncState, appName }) {
+function Header({ tab, setTab, syncState, appName, timerStatusRef }) {
+  const [timerChip, setTimerChip] = useState(null);
+  // pílula ⏱ ao vivo: o cronômetro continua montado (e contando) em outras abas,
+  // o Header lê o status dele 1x por segundo sem re-renderizar o app todo
+  useEffect(() => {
+    const id = setInterval(() => {
+      const st = timerStatusRef && timerStatusRef.current;
+      if (st && st.running) {
+        setTimerChip((prev) => {
+          if (prev && prev.text === st.text && prev.subject === st.subject) return prev;
+          return { text: st.text, subject: st.subject };
+        });
+      } else {
+        setTimerChip((prev) => (prev === null ? prev : null));
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [timerStatusRef]);
   const items = [
     { id: "painel", label: "Painel" },
     { id: "materias", label: "Matérias & Plano" },
@@ -632,6 +704,7 @@ function Header({ tab, setTab, syncState, appName }) {
     { id: "calendario", label: "Calendário" },
     { id: "cronometro", label: "Cronômetro" },
     { id: "questoes", label: "Questões" },
+    { id: "provas", label: "Provas" },
     { id: "importar", label: "Importar" },
     { id: "sessoes", label: "Sessões" },
   ];
@@ -644,6 +717,15 @@ function Header({ tab, setTab, syncState, appName }) {
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
           <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "-0.01em" }}>{appName || "Estudos"}</span>
           <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>v1.3</span>
+          {timerChip && tab !== "cronometro" && (
+            <button onClick={() => setTab("cronometro")} title="Voltar ao cronômetro" style={{
+              background: "var(--accent)22", border: "1px solid var(--accent)", color: "var(--text)",
+              borderRadius: 20, padding: "2px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+              fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap",
+            }}>
+              ⏱ {timerChip.text}{timerChip.subject ? ` · ${timerChip.subject}` : ""}
+            </button>
+          )}
           {syncLabel && <span style={{ fontSize: 11, color: syncColor, marginLeft: "auto" }}>{syncLabel}</span>}
         </div>
         <nav style={{ display: "flex", gap: 4, overflowX: "auto" }}>
@@ -1928,37 +2010,1080 @@ function GuiaEstudos({ subjects, setSubjects, topics, setTopics }) {
 // ---------- Caderno de anotações ----------
 const NOTE_COLORS = ["#E8A33D", "#4FB4A8", "#C4677D", "#7C9BC2", "#8FBF5F", "#B58AD9", "#D9A0E0", "#5FA8D3"];
 
-function NoteCard({ note, onSave, onRemove, onTogglePin }) {
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(note.title);
-  const [content, setContent] = useState(note.content);
-  const [color, setColor] = useState(note.color || NOTE_COLORS[0]);
+// ---------- Caderno de anotações ----------
+const NOTE_DRAW_W = 900;
+const NOTE_DRAW_H = 520;
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function stripHtml(h) {
+  return String(h == null ? "" : h).replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ");
+}
+function notePlainText(n) {
+  if (n.rich && n.contentHtml) return stripHtml(n.contentHtml);
+  return n.content || "";
+}
+
+const WORLD_W = 900, WORLD_H = 520;
+
+function migratePageItems(drawings) {
+  const arr = (drawings || []).map((d) => (d.k ? { ...d } : { ...d, k: "s" }));
+  if (!arr.length || (arr[0] && arr[0].world)) return arr;
+  return arr.map((it) => {
+    if (it.k === "t") return { ...it, x: it.x * 900, y: it.y * 520, size: (it.size || 15) * 1.5, world: true };
+    if (it.k === "img") return { ...it, x: it.x * 900, y: it.y * 520, w: it.w * 900, h: it.h * 520, world: true };
+    if (it.k === "g") return { ...it, p1: [it.p1[0] * 900, it.p1[1] * 520], p2: [it.p2[0] * 900, it.p2[1] * 520], width: (it.width || 3) * 1.5, world: true };
+    return { ...it, points: (it.points || []).map((p) => [p[0] * 900, p[1] * 520]), width: (it.width || 3) * 1.5, world: true };
+  });
+}
+
+function drawNoteStroke(ctx, st) {
+  const pts = st.points || [];
+  if (!pts.length) return;
+  ctx.save();
+  ctx.strokeStyle = st.color || "#E8A33D";
+  ctx.fillStyle = st.color || "#E8A33D";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (st.kind === "mark") {
+    ctx.globalAlpha = 0.35;
+    ctx.lineWidth = (st.width || 4) * 4;
+  } else {
+    ctx.lineWidth = st.width || 4;
+  }
+  ctx.beginPath();
+  pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]); });
+  if (pts.length === 1) {
+    ctx.beginPath();
+    ctx.arc(pts[0][0], pts[0][1], (st.width || 4) / 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawPageBgWorld(ctx, bg, cam, viewW, viewH, zoom) {
+  if (!bg || bg === "none") return;
+  const step = 44;
+  const x0 = Math.floor(cam.x / step) * step, x1 = cam.x + viewW / zoom;
+  const y0 = Math.floor(cam.y / step) * step, y1 = cam.y + viewH / zoom;
+  ctx.save();
+  if (bg === "dots") {
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    for (let x = x0 + step / 2; x < x1; x += step) {
+      for (let y = y0 + step / 2; y < y1; y += step) {
+        ctx.beginPath();
+        ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  } else {
+    ctx.strokeStyle = "rgba(255,255,255,0.07)";
+    ctx.lineWidth = 1 / zoom;
+    ctx.beginPath();
+    for (let y = y0 + step / 2; y < y1; y += step) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+    if (bg === "grid") {
+      for (let x = x0 + step / 2; x < x1; x += step) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function triVertices(it) {
+  const [x1, y1] = it.p1, [x2, y2] = it.p2;
+  const xa = Math.min(x1, x2), xb = Math.max(x1, x2);
+  const ya = Math.min(y1, y2), yb = Math.max(y1, y2);
+  return { A: [xa, yb], B: [xb, yb], C: [xa, ya] };
+}
+
+function starPoints(cx, cy, rx, ry) {
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? 1 : 0.45;
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    pts.push([cx + rx * r * Math.cos(a), cy + ry * r * Math.sin(a)]);
+  }
+  return pts;
+}
+function hexPoints(cx, cy, rx, ry) {
+  const pts = [];
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 3;
+    pts.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]);
+  }
+  return pts;
+}
+
+function arrowHead(ctx, x, y, ang, size) {
+  [Math.PI - 0.42, Math.PI + 0.42].forEach((off) => {
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + size * Math.cos(ang + off), y + size * Math.sin(ang + off));
+    ctx.stroke();
+  });
+}
+
+function drawNoteShape(ctx, it) {
+  const X = (v) => v, Y = (v) => v;
+  ctx.save();
+  ctx.strokeStyle = it.color || "#E8A33D";
+  ctx.fillStyle = it.color || "#E8A33D";
+  ctx.lineWidth = it.width || 4;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const [x1, y1] = it.p1, [x2, y2] = it.p2;
+  if (it.shape === "line" || it.shape === "arrow" || it.shape === "dblarrow") {
+    ctx.beginPath();
+    ctx.moveTo(X(x1), Y(y1));
+    ctx.lineTo(X(x2), Y(y2));
+    ctx.stroke();
+    const head = Math.max(15, (it.width || 4) * 4);
+    const ang = Math.atan2(Y(y2) - Y(y1), X(x2) - X(x1));
+    arrowHead(ctx, X(x2), Y(y2), ang, head);
+    if (it.shape === "dblarrow") arrowHead(ctx, X(x1), Y(y1), ang + Math.PI, head);
+  } else if (it.shape === "rect") {
+    ctx.strokeRect(X(x1), Y(y1), X(x2) - X(x1), Y(y2) - Y(y1));
+  } else if (it.shape === "circle") {
+    ctx.beginPath();
+    ctx.ellipse((X(x1) + X(x2)) / 2, (Y(y1) + Y(y2)) / 2, Math.abs(X(x2) - X(x1)) / 2 || 1, Math.abs(Y(y2) - Y(y1)) / 2 || 1, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (it.shape === "star" || it.shape === "hex") {
+    const cx = (X(x1) + X(x2)) / 2, cy = (Y(y1) + Y(y2)) / 2;
+    const rx = Math.abs(X(x2) - X(x1)) / 2 || 1, ry = Math.abs(Y(y2) - Y(y1)) / 2 || 1;
+    const pts = it.shape === "star" ? starPoints(cx, cy, rx, ry) : hexPoints(cx, cy, rx, ry);
+    ctx.beginPath();
+    pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]); });
+    ctx.closePath();
+    ctx.stroke();
+  } else if (it.shape === "tri") {
+    const { A, B, C } = triVertices(it);
+    ctx.beginPath();
+    ctx.moveTo(X(A[0]), Y(A[1]));
+    ctx.lineTo(X(B[0]), Y(B[1]));
+    ctx.lineTo(X(C[0]), Y(C[1]));
+    ctx.closePath();
+    ctx.stroke();
+    const s = 22;
+    ctx.beginPath();
+    ctx.moveTo(X(A[0]) + s, Y(A[1]));
+    ctx.lineTo(X(A[0]) + s, Y(A[1]) - s);
+    ctx.lineTo(X(A[0]), Y(A[1]) - s);
+    ctx.stroke();
+    const L = it.labels || {};
+    ctx.font = "600 20px Inter, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const marks = [
+      { t: L.cat1, x: (X(A[0]) + X(B[0])) / 2, y: (Y(A[1]) + Y(B[1])) / 2 + s },
+      { t: L.cat2, x: (X(A[0]) + X(C[0])) / 2 - s, y: (Y(A[1]) + Y(C[1])) / 2 },
+      { t: L.hip, x: (X(B[0]) + X(C[0])) / 2 + s * 0.6, y: (Y(B[1]) + Y(C[1])) / 2 - s * 0.4 },
+    ];
+    marks.forEach((m) => {
+      if (m.t === undefined || m.t === null || String(m.t).trim() === "") return;
+      const txt = String(m.t);
+      const w = ctx.measureText(txt).width + 12;
+      const h = 30;
+      ctx.fillStyle = "rgba(10,13,16,0.85)";
+      if (ctx.roundRect) {
+        ctx.beginPath();
+        ctx.roundRect(m.x - w / 2, m.y - h / 2, w, h, 6);
+        ctx.fill();
+      } else {
+        ctx.fillRect(m.x - w / 2, m.y - h / 2, w, h);
+      }
+      ctx.fillStyle = it.color || "#E8A33D";
+      ctx.fillText(txt, m.x, m.y + 1);
+    });
+  }
+  ctx.restore();
+}
+
+function drawNoteText(ctx, it) {
+  const size = it.size || 22;
+  ctx.save();
+  ctx.font = `600 ${size}px Inter, sans-serif`;
+  ctx.fillStyle = it.color || "#E9EDF1";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  const lines = String(it.text || "").split("\n");
+  const lh = size * 1.35;
+  lines.forEach((ln, i) => ctx.fillText(ln, it.x, it.y + i * lh));
+  ctx.restore();
+}
+
+function drawNoteImage(ctx, it, img) {
+  if (!img || !img.complete || !img.naturalWidth) return;
+  ctx.save();
+  ctx.drawImage(img, it.x, it.y, it.w, it.h);
+  ctx.restore();
+}
+
+function drawNoteItem(ctx, it, imgCache, onImgLoad) {
+  if (!it) return;
+  if (it.k === "t") { drawNoteText(ctx, it); return; }
+  if (it.k === "img") {
+    if (it.animated) return;
+    let img = imgCache[it.dataUrl];
+    if (!img) {
+      img = new Image();
+      imgCache[it.dataUrl] = img;
+      if (onImgLoad) img.onload = onImgLoad;
+      img.src = it.dataUrl;
+      return;
+    }
+    drawNoteImage(ctx, it, img);
+    return;
+  }
+  if (it.k === "g") { drawNoteShape(ctx, it); return; }
+  drawNoteStroke(ctx, it);
+}
+
+function noteItemsOf(drawings) {
+  return migratePageItems(drawings);
+}
+
+function distPtSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx, cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+function pointInTri(px, py, A, B, C) {
+  const d = (p, a, b) => (p[0] - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p[1] - b[1]);
+  const p = [px, py];
+  const d1 = d(p, A, B), d2 = d(p, B, C), d3 = d(p, C, A);
+  const neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+  const pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+  return !(neg && pos);
+}
+
+function hitNoteItem(ctx, it, wx, wy, zoom) {
+  const T = 16 / Math.max(0.3, zoom || 1);
+  if (it.k === "t") {
+    const size = it.size || 22;
+    ctx.save();
+    ctx.font = `600 ${size}px Inter, sans-serif`;
+    const lines = String(it.text || "").split("\n");
+    const w = Math.max.apply(null, [60].concat(lines.map((ln) => ctx.measureText(ln).width)));
+    ctx.restore();
+    const h = lines.length * size * 1.35;
+    return wx >= it.x - 8 && wx <= it.x + w + 8 && wy >= it.y - 8 && wy <= it.y + h + 8;
+  }
+  if (it.k === "img") {
+    return wx >= it.x && wx <= it.x + it.w && wy >= it.y && wy <= it.y + it.h;
+  }
+  if (it.k === "g") {
+    const [x1, y1] = it.p1, [x2, y2] = it.p2;
+    if (it.shape === "line" || it.shape === "arrow" || it.shape === "dblarrow") {
+      return distPtSeg(wx, wy, x1, y1, x2, y2) < T;
+    }
+    const xa = Math.min(x1, x2) - 8, xb = Math.max(x1, x2) + 8;
+    const ya = Math.min(y1, y2) - 8, yb = Math.max(y1, y2) + 8;
+    if (it.shape === "tri") {
+      const { A, B, C } = triVertices(it);
+      if (pointInTri(wx, wy, A, B, C)) return true;
+    }
+    return wx >= xa && wx <= xb && wy >= ya && wy <= yb;
+  }
+  return (it.points || []).some((p) => Math.hypot(p[0] - wx, p[1] - wy) < T);
+}
+
+function moveNoteItem(it, dx, dy) {
+  const sh = (p) => [p[0] + dx, p[1] + dy];
+  if (it.k === "t" || it.k === "img") return { ...it, x: it.x + dx, y: it.y + dy };
+  if (it.k === "g") return { ...it, p1: sh(it.p1), p2: sh(it.p2) };
+  return { ...it, points: (it.points || []).map(sh) };
+}
+
+function applyWorldTransform(ctx, cam, zoom, dpr) {
+  ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, -cam.x * dpr * zoom, -cam.y * dpr * zoom);
+}
+
+function paintWorldItems(ctx, items, bg, cam, zoom, viewW, viewH, dpr, imgCache, onLoad) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, Math.round(viewW * dpr), Math.round(viewH * dpr));
+  applyWorldTransform(ctx, cam, zoom, dpr);
+  drawPageBgWorld(ctx, bg, cam, viewW, viewH, zoom);
+  items.forEach((it) => {
+    if (it.k === "img" && it.animated) return;
+    drawNoteItem(ctx, it, imgCache, onLoad);
+  });
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function itemsBBox(items) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  function eat(x, y) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+  items.forEach((it) => {
+    if (it.k === "t") { eat(it.x, it.y); eat(it.x + 220, it.y + (it.size || 22) * 1.6); }
+    else if (it.k === "img") { eat(it.x, it.y); eat(it.x + it.w, it.y + it.h); }
+    else if (it.k === "g") { eat(it.p1[0], it.p1[1]); eat(it.p2[0], it.p2[1]); }
+    else (it.points || []).forEach((p) => eat(p[0], p[1]));
+  });
+  if (x0 === Infinity) return null;
+  const pad = 40;
+  return { x: x0 - pad, y: y0 - pad, w: (x1 - x0) + pad * 2, h: (y1 - y0) + pad * 2 };
+}
+function fitCamFor(viewW, viewH, items) {
+  const bb = itemsBBox(items);
+  const region = bb || { x: -40, y: -40, w: WORLD_W + 80, h: WORLD_H + 80 };
+  const zoom = Math.min(viewW / region.w, viewH / region.h, 3);
+  return { x: region.x + region.w / 2 - viewW / zoom / 2, y: region.y + region.h / 2 - viewH / zoom / 2, zoom };
+}
+
+function NoteDrawingView({ strokes, bg }) {
+  const ref = useRef(null);
+  const cache = useRef({});
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const items = migratePageItems(strokes);
+    const ctx = canvas.getContext("2d");
+    const paint = () => {
+      const bb = itemsBBox(items);
+      const region = bb || { x: -40, y: -40, w: WORLD_W + 80, h: WORLD_H + 80 };
+      const zoom = Math.min(canvas.width / region.w, canvas.height / region.h, 2.5);
+      const cam = { x: region.x + region.w / 2 - canvas.width / zoom / 2, y: region.y + region.h / 2 - canvas.height / zoom / 2 };
+      paintWorldItems(ctx, items, bg, cam, zoom, canvas.width, canvas.height, 1, cache.current, paint);
+    };
+    paint();
+  }, [strokes, bg]);
+  const items = migratePageItems(strokes);
+  if (!items.length && (!bg || bg === "none")) return null;
+  const anims = items.filter((it) => it.k === "img" && it.animated);
+  const bb = itemsBBox(items);
+  const region = bb || { x: -40, y: -40, w: WORLD_W + 80, h: WORLD_H + 80 };
+  const zoom = Math.min(900 / region.w, 520 / region.h, 2.5);
+  const cam = { x: region.x + region.w / 2 - 900 / zoom / 2, y: region.y + region.h / 2 - 520 / zoom / 2 };
+  return (
+    <div style={{ position: "relative", marginTop: 8 }}>
+      <canvas ref={ref} width={NOTE_DRAW_W} height={NOTE_DRAW_H} style={{ width: "100%", display: "block", borderRadius: 6, background: "rgba(0,0,0,0.18)", border: "1px solid var(--line)" }} />
+      {anims.map((it) => {
+        const st = {
+          position: "absolute",
+          left: (((it.x - cam.x) * zoom) / 900 * 100) + "%",
+          top: (((it.y - cam.y) * zoom) / 520 * 100) + "%",
+          width: ((it.w * zoom) / 900 * 100) + "%",
+          height: ((it.h * zoom) / 520 * 100) + "%",
+          objectFit: "fill",
+          borderRadius: 4,
+        };
+        return it.mime && it.mime.startsWith("video/") ? (
+          <video key={it.id} src={it.dataUrl} autoPlay loop muted playsInline ref={(el) => { if (el) el.muted = true; }} style={st} />
+        ) : (
+          <img key={it.id} src={it.dataUrl} draggable={false} style={st} alt="" />
+        );
+      })}
+    </div>
+  );
+}
+
+const NOTE_PAGE_TOOLS = [
+  { id: "move", label: "🖱️ Mover" },
+  { id: "pen", label: "✏️ Caneta" },
+  { id: "mark", label: "🖍️ Marca-texto" },
+  { id: "erase", label: "🧹 Borracha" },
+  { id: "text", label: "🔤 Texto" },
+  { id: "image", label: "🖼️ Imagem" },
+];
+const NOTE_SHAPES = [
+  { id: "line", label: "📏 Linha" },
+  { id: "arrow", label: "➡️ Seta" },
+  { id: "dblarrow", label: "↔️ Seta dupla" },
+  { id: "rect", label: "▭ Retângulo" },
+  { id: "circle", label: "⭕ Círculo" },
+  { id: "tri", label: "📐 Triângulo" },
+  { id: "star", label: "⭐ Estrela" },
+  { id: "hex", label: "⬡ Hexágono" },
+];
+const NOTE_PAGE_BGS = [
+  { id: "none", label: "Liso" },
+  { id: "lines", label: "Pautado" },
+  { id: "grid", label: "Quadriculado" },
+  { id: "dots", label: "Pontilhado" },
+];
+
+function NoteEditor({ initialTitle, initialHtml, initialColor, initialDrawings, initialPageBg, onSave, onCancel, saveLabel }) {
+  const [title, setTitle] = useState(initialTitle || "");
+  const [color, setColor] = useState(initialColor || NOTE_COLORS[0]);
+  const [pageTool, setPageTool] = useState("move");
+  const [pageShape, setPageShape] = useState("rect");
+  const [drawColor, setDrawColor] = useState(initialColor || NOTE_COLORS[0]);
+  const [drawWidth, setDrawWidth] = useState(4);
+  const [pageBg, setPageBg] = useState(initialPageBg || "none");
+  const [items, setItems] = useState(() => migratePageItems(initialDrawings));
+  const [hist, setHist] = useState(() => ({ stack: [migratePageItems(initialDrawings)], i: 0 }));
+  const [selectedId, setSelectedId] = useState(null);
+  const [showPage, setShowPage] = useState(true);
+  const [fullPage, setFullPage] = useState(false);
+  const [imgMsg, setImgMsg] = useState("");
+  const [cam, setCam] = useState({ x: 0, y: 0, zoom: 1 });
+  const [viewSize, setViewSize] = useState({ w: 800, h: 320 });
+  const editRef = useRef(null);
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const imgCache = useRef({});
+  const itemsRef = useRef(items);
+  const camRef = useRef(cam);
+  const gesture = useRef(null);
+  const fileRef = useRef(null);
+  const fittedRef = useRef(false);
+
+  const selected = items.find((it) => it.id === selectedId) || null;
+  const dpr = Math.min(2, (typeof window !== "undefined" && window.devicePixelRatio) || 1);
+
+  useEffect(() => { itemsRef.current = items; });
+  useEffect(() => { camRef.current = cam; });
+
+  // mede a área visível (CSS px) e ajusta o canvas; enquadra a região inicial 1x
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    function measure() {
+      const r = wrap.getBoundingClientRect();
+      const w = Math.max(200, Math.floor(r.width));
+      const h = Math.max(200, Math.floor(r.height));
+      setViewSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+      if (!fittedRef.current) {
+        fittedRef.current = true;
+        setCam(fitCamFor(w, h, itemsRef.current));
+      }
+    }
+    measure();
+    const t = setTimeout(measure, 120);
+    window.addEventListener("resize", measure);
+    let ro = null;
+    if (window.ResizeObserver) {
+      ro = new ResizeObserver(measure);
+      ro.observe(wrap);
+    }
+    return () => { clearTimeout(t); window.removeEventListener("resize", measure); if (ro) ro.disconnect(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPage, fullPage]);
+
+  function pushHist(next) {
+    setHist((h) => ({ stack: [...h.stack.slice(0, h.i + 1), next].slice(-40), i: Math.min(h.i + 1, 39) }));
+  }
+  function snap() {
+    pushHist(itemsRef.current);
+  }
+  function update(fn, withHist) {
+    const next = fn(itemsRef.current);
+    itemsRef.current = next;
+    setItems(next);
+    if (withHist) pushHist(next);
+  }
+  function undo() {
+    setHist((h) => {
+      if (h.i <= 0) return h;
+      const prev = h.stack[h.i - 1];
+      itemsRef.current = prev;
+      setItems(prev);
+      setSelectedId(null);
+      return { ...h, i: h.i - 1 };
+    });
+  }
+  function redo() {
+    setHist((h) => {
+      if (h.i >= h.stack.length - 1) return h;
+      const next = h.stack[h.i + 1];
+      itemsRef.current = next;
+      setItems(next);
+      setSelectedId(null);
+      return { ...h, i: h.i + 1 };
+    });
+  }
+
+  function exec(cmd, val) {
+    try {
+      editRef.current && editRef.current.focus();
+      if (cmd === "hiliteColor") {
+        if (!document.execCommand("hiliteColor", false, val)) document.execCommand("backColor", false, val);
+      } else {
+        document.execCommand(cmd, false, val == null ? null : val);
+      }
+    } catch (e) {}
+  }
+  function keepFocus(e) { e.preventDefault(); }
+  function fmtBtn(label, title, onClick) {
+    return (
+      <button
+        onMouseDown={keepFocus}
+        onClick={onClick}
+        title={title}
+        style={{ ...ghostBtn, padding: "4px 9px", fontSize: 13, minHeight: "auto", fontWeight: 700 }}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  function redraw() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const c = camRef.current;
+    paintWorldItems(ctx, itemsRef.current, pageBg, c, c.zoom, viewSize.w, viewSize.h, dpr, imgCache.current, redraw);
+    const sel = itemsRef.current.find((it) => it.id === selectedId);
+    if (sel) {
+      ctx.save();
+      applyWorldTransform(ctx, c, c.zoom, dpr);
+      ctx.strokeStyle = "#E9EDF1";
+      ctx.setLineDash([8 / c.zoom, 6 / c.zoom]);
+      ctx.lineWidth = 2 / c.zoom;
+      const pad = 8;
+      if (sel.k === "t") {
+        const size = sel.size || 22;
+        ctx.font = `600 ${size}px Inter, sans-serif`;
+        const lines = String(sel.text || "").split("\n");
+        const w = Math.max.apply(null, [60].concat(lines.map((ln) => ctx.measureText(ln).width)));
+        const h = lines.length * size * 1.35;
+        ctx.strokeRect(sel.x - pad, sel.y - pad, w + pad * 2, h + pad * 2);
+      } else if (sel.k === "img") {
+        ctx.strokeRect(sel.x - pad, sel.y - pad, sel.w + pad * 2, sel.h + pad * 2);
+      } else if (sel.k === "g") {
+        const [x1, y1] = sel.p1, [x2, y2] = sel.p2;
+        ctx.strokeRect(Math.min(x1, x2) - pad, Math.min(y1, y2) - pad, Math.abs(x2 - x1) + pad * 2, Math.abs(y2 - y1) + pad * 2);
+      } else if ((sel.points || []).length) {
+        const xs = sel.points.map((p) => p[0]);
+        const ys = sel.points.map((p) => p[1]);
+        ctx.strokeRect(Math.min.apply(null, xs) - pad, Math.min.apply(null, ys) - pad, Math.max.apply(null, xs) - Math.min.apply(null, xs) + pad * 2, Math.max.apply(null, ys) - Math.min.apply(null, ys) + pad * 2);
+      }
+      ctx.restore();
+    }
+    if (gesture.current && gesture.current.temp) {
+      const t = gesture.current.temp;
+      ctx.save();
+      applyWorldTransform(ctx, c, c.zoom, dpr);
+      if (t.shape) drawNoteShape(ctx, { shape: t.shape, color: drawColor, width: drawWidth, p1: t.p1, p2: t.p2, labels: {} });
+      else if (t.points) drawNoteStroke(ctx, { kind: t.kind, color: drawColor, width: drawWidth, points: t.points });
+      ctx.restore();
+    }
+  }
+
+  useEffect(() => { if (showPage) redraw(); });
+
+  function toWorld(e) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] && e.touches[0].clientX);
+    const cy = e.clientY !== undefined ? e.clientY : (e.touches && e.touches[0] && e.touches[0].clientY);
+    const c = camRef.current;
+    return { x: c.x + (cx - rect.left) / c.zoom, y: c.y + (cy - rect.top) / c.zoom };
+  }
+
+  function hitTop(wx, wy) {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const arr = itemsRef.current;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const it = arr[i];
+      if (it.k === "img" && it.animated) continue;
+      if (hitNoteItem(ctx, it, wx, wy, camRef.current.zoom)) return it;
+    }
+    return null;
+  }
+
+  function zoomAt(clientX, clientY, factor) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = clientX - rect.left, my = clientY - rect.top;
+    setCam((prev) => {
+      const nz = Math.max(0.15, Math.min(6, prev.zoom * factor));
+      const wx = prev.x + mx / prev.zoom, wy = prev.y + my / prev.zoom;
+      return { x: wx - mx / nz, y: wy - my / nz, zoom: nz };
+    });
+  }
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !showPage) return;
+    function onWheel(e) {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+    }
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPage, fullPage]);
+
+  function pageDown(e) {
+    if (e.button !== undefined && e.button === 1) return;
+    e.preventDefault();
+    const { x: wx, y: wy } = toWorld(e);
+    if (pageTool === "move") {
+      const hit = hitTop(wx, wy);
+      setSelectedId(hit ? hit.id : null);
+      if (hit) gesture.current = { moving: hit.id, last: [wx, wy] };
+      else gesture.current = { panning: true, last: [wx, wy] };
+      return;
+    }
+    if (pageTool === "text") {
+      const it = { id: uid(), k: "t", x: wx, y: wy, text: "Texto", color: drawColor, size: 22, world: true };
+      update((prev) => [...prev, it], true);
+      setSelectedId(it.id);
+      setPageTool("move");
+      return;
+    }
+    if (pageTool === "erase") {
+      snap();
+      gesture.current = { erasing: true };
+      eraseAt(wx, wy);
+      return;
+    }
+    if (pageTool === "shape") {
+      gesture.current = { shaping: true, start: [wx, wy], cur: [wx, wy] };
+      gesture.current.temp = { shape: pageShape, p1: [wx, wy], p2: [wx, wy] };
+      redraw();
+      return;
+    }
+    gesture.current = { drawing: true, kind: pageTool, points: [[wx, wy]] };
+  }
+  function pageMove(e) {
+    if (!gesture.current) return;
+    e.preventDefault();
+    const { x: wx, y: wy } = toWorld(e);
+    const g = gesture.current;
+    if (g.erasing) {
+      eraseAt(wx, wy);
+      return;
+    }
+    if (g.panning) {
+      const dx = wx - g.last[0], dy = wy - g.last[1];
+      g.last = [wx, wy];
+      setCam((prev) => ({ ...prev, x: prev.x - dx, y: prev.y - dy }));
+      return;
+    }
+    if (g.moving) {
+      const dx = wx - g.last[0], dy = wy - g.last[1];
+      g.last = [wx, wy];
+      update((prev) => prev.map((it) => (it.id === g.moving ? moveNoteItem(it, dx, dy) : it)), false);
+      return;
+    }
+    if (g.shaping) {
+      g.cur = [wx, wy];
+      g.temp = { shape: pageShape, p1: g.start, p2: [wx, wy] };
+      redraw();
+      return;
+    }
+    if (g.drawing) {
+      const last = g.points[g.points.length - 1];
+      const dx = wx - last[0], dy = wy - last[1];
+      const z = camRef.current.zoom;
+      if ((dx * dx + dy * dy) * z * z < 4) return;
+      g.points.push([wx, wy]);
+      g.temp = { kind: g.kind, points: g.points };
+      redraw();
+    }
+  }
+  function pageUp() {
+    if (!gesture.current) return;
+    const g = gesture.current;
+    gesture.current = null;
+    if (g.drawing && g.points.length > 0) {
+      update((prev) => [...prev, { id: uid(), k: "s", kind: g.kind, color: drawColor, width: drawWidth, points: g.points, world: true }], true);
+    } else if (g.shaping) {
+      const [sx, sy] = g.start;
+      const [ex, ey] = g.cur || g.start;
+      if (Math.hypot(ex - sx, ey - sy) < 10) { redraw(); return; }
+      const it = { id: uid(), k: "g", shape: pageShape, color: drawColor, width: drawWidth, p1: [sx, sy], p2: [ex, ey], world: true };
+      if (pageShape === "tri") it.labels = { cat1: "", cat2: "", hip: "" };
+      update((prev) => [...prev, it], true);
+      setSelectedId(it.id);
+      setPageTool("move");
+    } else {
+      redraw();
+    }
+  }
+
+  function eraseAt(wx, wy) {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    update((prev) => {
+      const kept = prev.filter((it) => {
+        if (it.k === "t" || it.k === "img") return true;
+        return !hitNoteItem(ctx, it, wx, wy, camRef.current.zoom);
+      });
+      return kept.length === prev.length ? prev : kept;
+    }, false);
+  }
+
+  function deleteSelected() {
+    if (!selectedId) return;
+    update((prev) => prev.filter((it) => it.id !== selectedId), true);
+    setSelectedId(null);
+  }
+  function duplicateSelected() {
+    if (!selectedId) return;
+    const src = itemsRef.current.find((it) => it.id === selectedId);
+    if (!src) return;
+    const copy = JSON.parse(JSON.stringify({ ...src, id: uid() }));
+    const moved = moveNoteItem(copy, 30, 30);
+    update((prev) => [...prev, moved], true);
+    setSelectedId(moved.id);
+  }
+  function orderSelected(front) {
+    if (!selectedId) return;
+    update((prev) => {
+      const rest = prev.filter((it) => it.id !== selectedId);
+      const sel = prev.find((it) => it.id === selectedId);
+      return front ? [...rest, sel] : [sel, ...rest];
+    }, true);
+  }
+  function patchSelected(patch) {
+    if (!selectedId) return;
+    update((prev) => prev.map((it) => (it.id === selectedId ? { ...it, ...patch } : it)), false);
+  }
+  function patchTriLabel(key, val) {
+    if (!selectedId) return;
+    update((prev) => prev.map((it) => (it.id === selectedId ? { ...it, labels: { ...(it.labels || {}), [key]: val } } : it)), false);
+  }
+  function clearPage() {
+    update(() => [], true);
+    setSelectedId(null);
+  }
+
+  function animScreenStyle(it) {
+    return {
+      position: "absolute",
+      left: ((it.x - cam.x) * cam.zoom) + "px",
+      top: ((it.y - cam.y) * cam.zoom) + "px",
+      width: (it.w * cam.zoom) + "px",
+      height: (it.h * cam.zoom) + "px",
+      objectFit: "fill",
+      borderRadius: 4,
+      cursor: pageTool === "move" ? "grab" : "default",
+      touchAction: "none",
+      outline: selectedId === it.id ? "2px dashed #E9EDF1" : "none",
+      outlineOffset: 2,
+      zIndex: 4,
+    };
+  }
+  function animDown(e, it) {
+    e.stopPropagation();
+    if (pageTool !== "move") return;
+    e.preventDefault();
+    setSelectedId(it.id);
+    const p = toWorld(e);
+    gesture.current = { moving: it.id, last: [p.x, p.y], anim: true };
+  }
+  function animMove(e) {
+    const g = gesture.current;
+    if (!g || !g.anim) return;
+    e.preventDefault();
+    const p = toWorld(e);
+    const dx = p.x - g.last[0], dy = p.y - g.last[1];
+    g.last = [p.x, p.y];
+    update((prev) => prev.map((it) => (it.id === g.moving ? moveNoteItem(it, dx, dy) : it)), false);
+  }
+  function animUp() {
+    if (gesture.current && gesture.current.anim) gesture.current = null;
+  }
+
+  function handleImageFile(e) {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setImgMsg("");
+    const isAnim = file.type === "image/gif" || (file.type || "").startsWith("video/");
+    const isImg = (file.type || "").startsWith("image/");
+    if (!isImg && !isAnim) { setImgMsg("Esse arquivo não é imagem nem animação."); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (isAnim) {
+        const url = reader.result;
+        if (url.length > 2 * 1024 * 1024) { setImgMsg("Animação grande demais (limite ~2MB)."); return; }
+        const probe = isImg ? new Image() : document.createElement("video");
+        const done = () => {
+          const nw = isImg ? (probe.naturalWidth || 320) : (probe.videoWidth || 320);
+          const nh = isImg ? (probe.naturalHeight || 240) : (probe.videoHeight || 240);
+          const c = camRef.current;
+          const targetW = Math.min(420, nw);
+          const w = targetW, h = targetW * (nh / Math.max(1, nw));
+          const cx = c.x + viewSize.w / c.zoom / 2, cy = c.y + viewSize.h / c.zoom / 2;
+          const it = { id: uid(), k: "img", animated: true, mime: file.type, dataUrl: url, x: cx - w / 2, y: cy - h / 2, w, h, world: true };
+          update((prev) => [...prev, it], true);
+          setSelectedId(it.id);
+          setPageTool("move");
+        };
+        if (isImg) { probe.onload = done; probe.onerror = () => setImgMsg("Não consegui ler essa imagem."); }
+        else {
+          probe.muted = true;
+          probe.onloadedmetadata = done;
+          probe.onerror = () => setImgMsg("Não consegui ler esse vídeo.");
+        }
+        probe.src = url;
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 640;
+        const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+        const cw = document.createElement("canvas");
+        cw.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        cw.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        cw.getContext("2d").drawImage(img, 0, 0, cw.width, cw.height);
+        const url = cw.toDataURL("image/jpeg", 0.82);
+        if (url.length > 950 * 1024) { setImgMsg("Imagem grande demais mesmo comprimida (limite ~900KB)."); return; }
+        const c = camRef.current;
+        const w = Math.min(420, cw.width);
+        const h = w * (cw.height / Math.max(1, cw.width));
+        const cx = c.x + viewSize.w / c.zoom / 2, cy = c.y + viewSize.h / c.zoom / 2;
+        const it = { id: uid(), k: "img", dataUrl: url, x: cx - w / 2, y: cy - h / 2, w, h, world: true };
+        update((prev) => [...prev, it], true);
+        setSelectedId(it.id);
+        setPageTool("move");
+      };
+      img.onerror = () => setImgMsg("Não consegui ler essa imagem.");
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
 
   function save() {
-    onSave(note.id, { title: title.trim() || "Sem título", content, color, updatedAt: new Date().toISOString() });
-    setEditing(false);
+    const el = editRef.current;
+    const html = el ? el.innerHTML : "";
+    const plain = el ? el.innerText : "";
+    if (!title.trim() && !plain.trim() && itemsRef.current.length === 0) { onCancel(); return; }
+    onSave({ title: title.trim() || "Sem título", contentHtml: html, content: plain, rich: true, color, drawings: itemsRef.current, pageBg });
   }
-  function cancel() {
-    setTitle(note.title); setContent(note.content); setColor(note.color || NOTE_COLORS[0]);
+
+  const animItems = items.filter((it) => it.k === "img" && it.animated);
+
+  const pageBlock = showPage ? (
+    <div style={fullPage ? {
+      position: "fixed", inset: 0, zIndex: 200, background: "rgba(8,10,13,0.97)",
+      display: "flex", flexDirection: "column", padding: 12, overflowY: "auto",
+    } : {
+      background: "var(--bg)", border: "1px solid var(--line)", borderRadius: 6, padding: 8,
+      display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <div style={{ width: "100%", maxWidth: fullPage ? 1100 : "none", margin: "0 auto", display: "flex", flexDirection: "column", gap: 8, flex: fullPage ? 1 : "none", minHeight: fullPage ? 0 : "none" }}>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+          {NOTE_PAGE_TOOLS.map((t) => (
+            <button key={t.id} onClick={() => { if (t.id === "image") { if (fileRef.current) fileRef.current.click(); } else { setPageTool(t.id); } }} title={t.id === "image" ? "Anexar imagem ou animação (GIF/WebM)" : t.label} style={{
+              ...ghostBtn, padding: "4px 8px", fontSize: 12, minHeight: "auto",
+              background: pageTool === t.id ? "var(--surface2)" : "transparent",
+              borderColor: pageTool === t.id ? "var(--accent)" : "var(--line)",
+            }}>{t.label}</button>
+          ))}
+          <input ref={fileRef} type="file" accept="image/*,video/webm,video/mp4" onChange={handleImageFile} style={{ display: "none" }} />
+          <button onClick={undo} disabled={hist.i <= 0} title="Desfazer" style={{ ...ghostBtn, padding: "4px 8px", fontSize: 12, minHeight: "auto", opacity: hist.i <= 0 ? 0.4 : 1 }}>↩️</button>
+          <button onClick={redo} disabled={hist.i >= hist.stack.length - 1} title="Refazer" style={{ ...ghostBtn, padding: "4px 8px", fontSize: 12, minHeight: "auto", opacity: hist.i >= hist.stack.length - 1 ? 0.4 : 1 }}>↪️</button>
+          <button onClick={() => setFullPage((v) => !v)} title={fullPage ? "Sair da tela cheia" : "Abrir em tela cheia"} style={{ ...ghostBtn, padding: "4px 8px", fontSize: 12, minHeight: "auto", marginLeft: "auto" }}>
+            {fullPage ? "⛶ Sair" : "⛶ Tela cheia"}
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Formas:</span>
+          {NOTE_SHAPES.map((t) => (
+            <button key={t.id} onClick={() => { setPageShape(t.id); setPageTool("shape"); }} title={t.label + " (arraste na página para criar)"} style={{
+              ...ghostBtn, padding: "4px 8px", fontSize: 12, minHeight: "auto",
+              background: pageTool === "shape" && pageShape === t.id ? "var(--surface2)" : "transparent",
+              borderColor: pageTool === "shape" && pageShape === t.id ? "var(--accent)" : "var(--line)",
+            }}>{t.label}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input type="color" value={drawColor} onChange={(e) => setDrawColor(e.target.value)} title="Cor" style={{ width: 26, height: 26, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+          <input type="range" min="1" max="14" value={drawWidth} onChange={(e) => setDrawWidth(Number(e.target.value))} title="Espessura" style={{ width: 90 }} />
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>{items.length} objeto{items.length === 1 ? "" : "s"}</span>
+          <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={() => setCam((p) => ({ ...p, zoom: Math.min(6, p.zoom * 1.25) }))} title="Aproximar" style={{ ...ghostBtn, padding: "3px 8px", fontSize: 12, minHeight: "auto" }}>➕</button>
+            <span style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace", minWidth: 44, textAlign: "center" }}>{Math.round(cam.zoom * 100)}%</span>
+            <button onClick={() => setCam((p) => ({ ...p, zoom: Math.max(0.15, p.zoom / 1.25) }))} title="Afastar" style={{ ...ghostBtn, padding: "3px 8px", fontSize: 12, minHeight: "auto" }}>➖</button>
+            <button onClick={() => setCam(fitCamFor(viewSize.w, viewSize.h, itemsRef.current))} title="Enquadrar tudo" style={{ ...ghostBtn, padding: "3px 8px", fontSize: 11, minHeight: "auto" }}>🖼️ Enquadrar</button>
+          </div>
+          <div style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: "auto", flexWrap: "wrap" }}>
+            {NOTE_PAGE_BGS.map((b) => (
+              <button key={b.id} onClick={() => setPageBg(b.id)} title={"Fundo " + b.label} style={{
+                ...ghostBtn, padding: "3px 8px", fontSize: 11, minHeight: "auto",
+                background: pageBg === b.id ? "var(--surface2)" : "transparent",
+                borderColor: pageBg === b.id ? "var(--accent)" : "var(--line)",
+              }}>{b.label}</button>
+            ))}
+            <button onClick={clearPage} style={{ ...ghostBtn, padding: "3px 8px", fontSize: 11 }}>Limpar página</button>
+          </div>
+        </div>
+        {imgMsg && <div style={{ fontSize: 11.5, color: "var(--danger)" }}>{imgMsg}</div>}
+        <div ref={wrapRef} style={{ position: "relative", width: "100%", height: fullPage ? undefined : 320, flex: fullPage ? 1 : "none", minHeight: fullPage ? 280 : 320, borderRadius: 6, overflow: "hidden", background: "rgba(0,0,0,0.18)", border: "1px dashed var(--line)" }}>
+          <canvas
+            ref={canvasRef}
+            width={Math.max(1, Math.round(viewSize.w * dpr))}
+            height={Math.max(1, Math.round(viewSize.h * dpr))}
+            onPointerDown={pageDown}
+            onPointerMove={pageMove}
+            onPointerUp={pageUp}
+            onPointerLeave={pageUp}
+            onPointerCancel={pageUp}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: pageTool === "move" ? "default" : "crosshair" }}
+          />
+          {animItems.map((it) => (
+            it.mime && it.mime.startsWith("video/") ? (
+              <video
+                key={it.id}
+                src={it.dataUrl}
+                autoPlay loop muted playsInline
+                ref={(el) => { if (el) el.muted = true; }}
+                onPointerDown={(e) => animDown(e, it)}
+                onPointerMove={animMove}
+                onPointerUp={animUp}
+                onPointerCancel={animUp}
+                style={animScreenStyle(it)}
+              />
+            ) : (
+              <img
+                key={it.id}
+                src={it.dataUrl}
+                draggable={false}
+                onPointerDown={(e) => animDown(e, it)}
+                onPointerMove={animMove}
+                onPointerUp={animUp}
+                onPointerCancel={animUp}
+                style={animScreenStyle(it)}
+                alt=""
+              />
+            )
+          ))}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+          {pageTool === "move" && (selected ? "Objeto selecionado — arraste para mover. Arraste no vazio para passear pela folha infinita." : "Toque num objeto para selecionar e mover · arraste no vazio para passear · scroll/pinça: use ➕➖ (ou a rodinha do mouse).")}
+          {pageTool === "pen" && "Desenhe livremente — a folha não tem fim, passeie com a ferramenta Mover."}
+          {pageTool === "mark" && "Destaque trechos com o marca-texto."}
+          {pageTool === "erase" && "Passe por cima para apagar traços e formas."}
+          {pageTool === "text" && "Toque na página para fixar um texto (depois edite abaixo)."}
+          {pageTool === "shape" && "Arraste na página para criar a forma — depois mova à vontade."}
+          {pageTool === "image" && "Escolha imagem, GIF ou animação WebM para anexar (GIF/WebM tocam animados)."}
+        </div>
+        {selected && (
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--accent)", borderRadius: 6, padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>
+                {selected.k === "t" ? "🔤 Texto" : selected.k === "img" ? "🖼️ Imagem" : selected.k === "g" ? "📐 Forma" : "✏️ Traço"} selecionado
+              </span>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 4, flexWrap: "wrap" }}>
+                <button onClick={duplicateSelected} style={{ ...ghostBtn, padding: "3px 8px", fontSize: 11 }} title="Duplicar objeto">⧉ Duplicar</button>
+                <button onClick={() => orderSelected(true)} style={{ ...ghostBtn, padding: "3px 8px", fontSize: 11 }} title="Trazer para frente">⬆️ Frente</button>
+                <button onClick={() => orderSelected(false)} style={{ ...ghostBtn, padding: "3px 8px", fontSize: 11 }} title="Enviar para trás">⬇️ Trás</button>
+                <button onClick={deleteSelected} style={{ ...ghostBtn, padding: "3px 8px", fontSize: 11, borderColor: "var(--danger)", color: "var(--danger)" }}>🗑️ Excluir</button>
+              </div>
+            </div>
+            {selected.k === "t" && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <input value={selected.text} onFocus={snap} onChange={(e) => patchSelected({ text: e.target.value })} placeholder="Texto do rótulo" style={{ ...input, flex: 1, minWidth: 120 }} />
+                <input type="color" value={selected.color} onFocus={snap} onChange={(e) => patchSelected({ color: e.target.value })} style={{ width: 26, height: 26, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+                <input type="range" min="12" max="48" value={selected.size || 22} onFocus={snap} onChange={(e) => patchSelected({ size: Number(e.target.value) })} title="Tamanho" style={{ width: 90 }} />
+              </div>
+            )}
+            {selected.k === "g" && selected.shape === "tri" && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Valores dos lados:</span>
+                <input value={(selected.labels || {}).cat1 || ""} onFocus={snap} onChange={(e) => patchTriLabel("cat1", e.target.value)} placeholder="Cateto 1" style={{ ...input, width: 80 }} />
+                <input value={(selected.labels || {}).cat2 || ""} onFocus={snap} onChange={(e) => patchTriLabel("cat2", e.target.value)} placeholder="Cateto 2" style={{ ...input, width: 80 }} />
+                <input value={(selected.labels || {}).hip || ""} onFocus={snap} onChange={(e) => patchTriLabel("hip", e.target.value)} placeholder="Hipotenusa" style={{ ...input, width: 90 }} />
+              </div>
+            )}
+            {(selected.k === "g" || selected.k === "s") && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <input type="color" value={selected.color} onFocus={snap} onChange={(e) => patchSelected({ color: e.target.value })} style={{ width: 26, height: 26, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+                <input type="range" min="1" max="14" value={selected.width || 4} onFocus={snap} onChange={(e) => patchSelected({ width: Number(e.target.value) })} title="Espessura" style={{ width: 90 }} />
+              </div>
+            )}
+            {selected.k === "img" && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Tamanho:</span>
+                <input type="range" min="5" max="200" value={Math.round(((selected.w || 200) / 400) * 100)} onFocus={snap} onChange={(e) => { const w = (Number(e.target.value) / 100) * 400; const aspect = (selected.h || 150) / (selected.w || 200); patchSelected({ w, h: w * aspect }); }} style={{ width: 120 }} />
+                {selected.animated && <span style={{ fontSize: 11.5, color: "var(--accent2)" }}>▶️ animação (toca sozinha)</span>}
+              </div>
+            )}
+          </div>
+        )}
+        {fullPage && (
+          <div style={{ display: "flex", gap: 8, position: "sticky", bottom: 0, padding: "8px 0" }}>
+            <button onClick={save} style={{ ...primaryBtn, flex: 1 }}>💾 Salvar nota</button>
+            <button onClick={() => setFullPage(false)} style={ghostBtn}>⛶ Sair da tela cheia</button>
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <div style={{ background: "var(--surface2)", border: `1px solid ${color}`, borderLeft: `4px solid ${color}`, borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título" style={{ ...input, fontWeight: 600 }} />
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", background: "var(--bg)", border: "1px solid var(--line)", borderRadius: 6, padding: 6 }}>
+        {fmtBtn("B", "Negrito", () => exec("bold"))}
+        {fmtBtn("I", "Itálico", () => exec("italic"))}
+        {fmtBtn("U", "Sublinhado", () => exec("underline"))}
+        <span style={{ width: 1, height: 20, background: "var(--line)" }} />
+        {["#E8A33D", "#4FB4A8", "#C4677D", "#7C9BC2", "#8FBF5F", "#E9EDF1"].map((c) => (
+          <button key={"fg" + c} onMouseDown={keepFocus} onClick={() => exec("foreColor", c)} title="Cor do texto" style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: "2px solid var(--line)", cursor: "pointer" }} />
+        ))}
+        <span style={{ width: 1, height: 20, background: "var(--line)" }} />
+        {["#E8A33D55", "#8FBF5F55", "#4FB4A855", "#C4677D55", "#7C9BC255"].map((c) => (
+          <button key={"hl" + c} onMouseDown={keepFocus} onClick={() => exec("hiliteColor", c)} title="Destacar (marca-texto)" style={{ width: 20, height: 14, minHeight: 14, borderRadius: 3, background: c, border: "1px solid var(--line)", cursor: "pointer" }} />
+        ))}
+        <span style={{ width: 1, height: 20, background: "var(--line)" }} />
+        {fmtBtn("⬅", "Alinhar à esquerda", () => exec("justifyLeft"))}
+        {fmtBtn("⬌", "Centralizar", () => exec("justifyCenter"))}
+      </div>
+      <div
+        ref={editRef}
+        contentEditable
+        dangerouslySetInnerHTML={{ __html: initialHtml || "" }}
+        data-placeholder="Sua anotação... (selecione o texto para formatar)"
+        style={{ ...input, minHeight: 90, fontFamily: "inherit", lineHeight: 1.55, outline: "none", overflowY: "auto" }}
+      />
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button onClick={() => setShowPage((v) => !v)} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>
+          {showPage ? "📄 Esconder página virtual" : "📄 Página virtual (desenho + formas + imagem)"}
+        </button>
+        {!showPage && (
+          <button onClick={() => { setShowPage(true); setFullPage(true); }} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>
+            ⛶ Abrir página em tela cheia
+          </button>
+        )}
+      </div>
+      {pageBlock}
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        {NOTE_COLORS.map((c) => (
+          <button key={c} onClick={() => setColor(c)} style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
+        ))}
+        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button onClick={onCancel} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>Cancelar</button>
+          <button onClick={save} style={{ ...primaryBtn, padding: "5px 10px", fontSize: 12 }}>{saveLabel || "Salvar"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NoteCard({ note, onSave, onRemove, onTogglePin }) {
+  const [editing, setEditing] = useState(false);
+
+  function save(data) {
+    onSave(note.id, { ...data, updatedAt: new Date().toISOString() });
     setEditing(false);
   }
 
   if (editing) {
     return (
-      <div style={{ background: "var(--surface2)", border: `1px solid ${color}`, borderLeft: `4px solid ${color}`, borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título" style={{ ...input, fontWeight: 600 }} />
-        <textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="Sua anotação..." style={{ ...input, minHeight: 90, resize: "vertical", fontFamily: "inherit" }} />
-        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          {NOTE_COLORS.map((c) => (
-            <button key={c} onClick={() => setColor(c)} style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: color === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
-          ))}
-          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
-          <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-            <button onClick={cancel} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>Cancelar</button>
-            <button onClick={save} style={{ ...primaryBtn, padding: "5px 10px", fontSize: 12 }}>Salvar</button>
-          </div>
-        </div>
-      </div>
+      <NoteEditor
+        initialTitle={note.title}
+        initialHtml={note.rich ? (note.contentHtml || "") : escapeHtml(note.content || "")}
+        initialColor={note.color || NOTE_COLORS[0]}
+        initialDrawings={note.drawings || []}
+        initialPageBg={note.pageBg || "none"}
+        onSave={save}
+        onCancel={() => setEditing(false)}
+      />
     );
   }
 
@@ -1970,7 +3095,12 @@ function NoteCard({ note, onSave, onRemove, onTogglePin }) {
         <button onClick={() => setEditing(true)} style={iconBtn} aria-label="Editar">✏️</button>
         <button onClick={() => onRemove(note.id)} style={iconBtn} aria-label="Excluir">×</button>
       </div>
-      <div style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{note.content || "(vazio)"}</div>
+      {note.rich && note.contentHtml ? (
+        <div dangerouslySetInnerHTML={{ __html: note.contentHtml }} style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, wordBreak: "break-word" }} />
+      ) : (
+        <div style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{note.content || "(vazio)"}</div>
+      )}
+      <NoteDrawingView strokes={note.drawings} bg={note.pageBg} />
     </div>
   );
 }
@@ -1979,9 +3109,6 @@ function Caderno({ subjects, notes, setNotes }) {
   const [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState({});
   const [addingFor, setAddingFor] = useState(null);
-  const [newTitle, setNewTitle] = useState("");
-  const [newContent, setNewContent] = useState("");
-  const [newColor, setNewColor] = useState(NOTE_COLORS[0]);
 
   function toggleCollapsed(id) {
     setCollapsed((prev) => {
@@ -1991,13 +3118,13 @@ function Caderno({ subjects, notes, setNotes }) {
   }
 
   function startAdd(subjectId) {
-    setAddingFor(subjectId); setNewTitle(""); setNewContent(""); setNewColor(NOTE_COLORS[Math.floor(Math.random() * NOTE_COLORS.length)]);
+    setAddingFor(subjectId);
   }
-  function saveNew() {
-    if (!newTitle.trim() && !newContent.trim()) { setAddingFor(null); return; }
+  function saveNew(data) {
     setNotes((prev) => [{
-      id: uid(), subjectId: addingFor, title: newTitle.trim() || "Sem título", content: newContent,
-      color: newColor, pinned: false, updatedAt: new Date().toISOString(),
+      id: uid(), subjectId: addingFor, title: data.title, contentHtml: data.contentHtml, content: data.content,
+      rich: true, color: data.color, drawings: data.drawings, pageBg: data.pageBg,
+      pinned: false, updatedAt: new Date().toISOString(),
     }, ...prev]);
     setAddingFor(null);
   }
@@ -2008,7 +3135,8 @@ function Caderno({ subjects, notes, setNotes }) {
   const searchLower = search.trim().toLowerCase();
   const isSearching = searchLower.length > 0;
   function noteMatches(n) {
-    return n.title.toLowerCase().includes(searchLower) || (n.content || "").toLowerCase().includes(searchLower);
+    const hay = (n.title + " " + notePlainText(n)).toLowerCase();
+    return hay.includes(searchLower);
   }
 
   const visibleSubjects = subjects.filter((s) => {
@@ -2060,20 +3188,14 @@ function Caderno({ subjects, notes, setNotes }) {
                 )}
 
                 {addingFor === s.id ? (
-                  <div style={{ background: "var(--surface2)", border: `1px solid ${newColor}`, borderLeft: `4px solid ${newColor}`, borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                    <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Título" style={{ ...input, fontWeight: 600 }} autoFocus />
-                    <textarea value={newContent} onChange={(e) => setNewContent(e.target.value)} placeholder="Sua anotação..." style={{ ...input, minHeight: 90, resize: "vertical", fontFamily: "inherit" }} />
-                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                      {NOTE_COLORS.map((c) => (
-                        <button key={c} onClick={() => setNewColor(c)} style={{ width: 20, height: 20, minHeight: 20, borderRadius: "50%", background: c, border: newColor === c ? "2px solid var(--text)" : "2px solid transparent", cursor: "pointer" }} />
-                      ))}
-                      <input type="color" value={newColor} onChange={(e) => setNewColor(e.target.value)} style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
-                      <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                        <button onClick={() => setAddingFor(null)} style={{ ...ghostBtn, padding: "5px 10px", fontSize: 12 }}>Cancelar</button>
-                        <button onClick={saveNew} style={{ ...primaryBtn, padding: "5px 10px", fontSize: 12 }}>Salvar</button>
-                      </div>
-                    </div>
-                  </div>
+                  <NoteEditor
+                    initialTitle=""
+                    initialHtml=""
+                    initialColor={NOTE_COLORS[Math.floor(Math.random() * NOTE_COLORS.length)]}
+                    initialDrawings={[]}
+                    onSave={saveNew}
+                    onCancel={() => setAddingFor(null)}
+                  />
                 ) : (
                   <button onClick={() => startAdd(s.id)} style={ghostBtn}>+ Nova anotação</button>
                 )}
@@ -2093,7 +3215,7 @@ const MODES = [
   { id: "regressiva", label: "Contagem regressiva", direction: "down" },
 ];
 
-function Cronometro({ subjects, sessions, setSessions, timerSound }) {
+function Cronometro({ subjects, sessions, setSessions, timerSound, statusRef }) {
   const [modeId, setModeId] = useState("pomodoro");
   const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
   const [customMin, setCustomMin] = useState(25);
@@ -2186,6 +3308,9 @@ function Cronometro({ subjects, sessions, setSessions, timerSound }) {
   }, [subjects, elapsed]);
 
   const activeSubject = subjects.find((s) => s.id === subjectId);
+  // publica o status ao vivo pro Header (pílula ⏱) — o componente continua
+  // montado ao trocar de aba, então a contagem não para
+  if (statusRef) statusRef.current = { running, text: fmtTime(display), subject: activeSubject ? activeSubject.name : "" };
   const size = 220, stroke = 10, r = (size - stroke) / 2, circ = 2 * Math.PI * r;
 
   return (
@@ -2348,11 +3473,13 @@ const QUESTIONS_JSON_EXAMPLE = `{
   ]
 }`;
 
-function Importer({ subjects, setSubjects, setQuestions, setTab }) {
+function Importer({ subjects, setSubjects, setQuestions, setTab, savedExams, setSavedExams }) {
   const [source, setSource] = useState("");
   const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
   const [examText, setExamText] = useState("");
   const [keyText, setKeyText] = useState("");
+  const [examPdfDataUrl, setExamPdfDataUrl] = useState(null);
+  const [keyPdfDataUrl, setKeyPdfDataUrl] = useState(null);
   const [preview, setPreview] = useState(null);
   const [loadingExam, setLoadingExam] = useState(false);
   const [loadingKey, setLoadingKey] = useState(false);
@@ -2361,14 +3488,27 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
   const [rangeFrom, setRangeFrom] = useState("");
   const [rangeTo, setRangeTo] = useState("");
   const [rangeSubject, setRangeSubject] = useState(subjects[0]?.id || "");
+  const [rangeTopic, setRangeTopic] = useState("");
   const examFileRef = useRef(null);
   const keyFileRef = useRef(null);
 
   const [jsonText, setJsonText] = useState("");
   const [jsonMsg, setJsonMsg] = useState("");
   const [showJsonFormat, setShowJsonFormat] = useState(false);
+  const [jsonPreview, setJsonPreview] = useState(null); // { materias: [{ jsonName, mappedSubjectId, isNew, color, icon }], questions: [...] }
+  // Preview para importação PDF (com mapeamento de matérias igual ao JSON)
+  const [pdfPreview, setPdfPreview] = useState(null);
 
   useEffect(() => { if (!subjectId && subjects[0]) setSubjectId(subjects[0].id); }, [subjects]);
+
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
 
   async function handleExamFile(e) {
     const file = e.target.files[0];
@@ -2378,6 +3518,15 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
     try {
       const text = await extractAnyText(file);
       setExamText(text);
+      // PDFs muito grandes estouram o localStorage — nesse caso importa as questões
+      // mas não guarda o PDF para visualização
+      if (file.size > 2.5 * 1024 * 1024) {
+        setExamPdfDataUrl(null);
+        setFileError("PDF da prova muito grande (+2,5MB): vou importar as questões, mas sem salvar o PDF para visualização.");
+      } else {
+        const dataUrl = await readFileAsDataUrl(file);
+        setExamPdfDataUrl(dataUrl);
+      }
       if (!source.trim()) setSource(file.name.replace(/\.(pdf|txt)$/i, ""));
     } catch (err) {
       setFileError("Não consegui ler esse arquivo. Tente colar o texto manualmente.");
@@ -2395,6 +3544,12 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
     try {
       const text = await extractAnyText(file);
       setKeyText(text);
+      if (file.size > 2.5 * 1024 * 1024) {
+        setKeyPdfDataUrl(null);
+      } else {
+        const dataUrl = await readFileAsDataUrl(file);
+        setKeyPdfDataUrl(dataUrl);
+      }
     } catch (err) {
       setFileError("Não consegui ler o gabarito. Tente colar o texto manualmente.");
     } finally {
@@ -2403,66 +3558,230 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
     }
   }
 
+  function buildPdfPreview(parsedQuestions, answerMap) {
+    let currentSubjects = subjects;
+    const materiaMap = {};
+    const questions = [];
+
+    // Agrupa questões por matéria baseada no subjectId inicial (todas começam com o mesmo)
+    // O usuário vai poder mapear intervalos depois
+    parsedQuestions.forEach((q) => {
+      if (!q.hasAlts) return; // só questões com alternativas reconhecidas
+      const num = q.num;
+      const answer = answerMap[num] || null;
+      
+      // Para PDF, inicialmente todas vão para uma "matéria genérica" baseada no source
+      // O usuário vai atribuir matérias por intervalo
+      const jsonName = source.trim() || "Prova importada";
+      
+      if (!materiaMap[jsonName]) {
+        const existing = currentSubjects.find((s) => s.name.toLowerCase() === jsonName.toLowerCase());
+        if (existing) {
+          materiaMap[jsonName] = { mappedSubjectId: existing.id, isNew: false, color: existing.color, icon: existing.icon };
+        } else {
+          const newId = uid();
+          const color = PALETTE[currentSubjects.length % PALETTE.length];
+          materiaMap[jsonName] = { mappedSubjectId: newId, isNew: true, color, icon: null };
+          currentSubjects = [...currentSubjects, { id: newId, name: jsonName, color, icon: null }];
+        }
+      }
+
+      const alts = q.alternatives;
+      questions.push({
+        num,
+        jsonName,
+        subjectId: materiaMap[jsonName].mappedSubjectId,
+        source: source.trim() || "Sem título",
+        topic: "",
+        statement: q.statement,
+        alternatives: alts,
+        answer,
+        altCount: Object.keys(alts).length,
+        hasAlts: Object.keys(alts).length >= 2,
+        difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
+      });
+    });
+
+    return { materias: materiaMap, questions, allSubjects: currentSubjects };
+  }
+
   function runParse() {
     const parsedQuestions = parseExamText(examText);
     const answerMap = parseAnswerKey(keyText);
-    const merged = parsedQuestions.map((q) => ({ ...q, answer: answerMap[q.num] || null, subjectId }));
-    setPreview(merged);
-    setShowRaw(merged.length === 0);
+    const preview = buildPdfPreview(parsedQuestions, answerMap);
+    setPdfPreview(preview);
+    setShowRaw(preview.questions.length === 0);
   }
 
   function applyRangeSubject() {
     const from = parseInt(rangeFrom, 10);
     const to = parseInt(rangeTo, 10);
-    if (!preview || isNaN(from) || isNaN(to) || !rangeSubject) return;
-    setPreview((prev) => prev.map((q) => (q.num >= from && q.num <= to ? { ...q, subjectId: rangeSubject } : q)));
+    if (!pdfPreview || isNaN(from) || isNaN(to) || !rangeSubject) return;
+    const topic = rangeTopic.trim();
+    setPdfPreview((prev) => {
+      if (!prev) return null;
+      const updatedQuestions = prev.questions.map((q) =>
+        q.num >= from && q.num <= to ? { ...q, subjectId: rangeSubject, ...(topic ? { topic } : {}) } : q
+      );
+      return { ...prev, questions: updatedQuestions };
+    });
+    setRangeTopic("");
   }
 
-  function confirmImport() {
-    if (!preview) return;
-    const toAdd = preview.filter((q) => q.hasAlts).map((q) => ({
-      id: uid(), source: source.trim() || "Sem título", subjectId: q.subjectId || subjectId, topic: "",
-      statement: q.statement, alternatives: q.alternatives, answer: q.answer,
+  function updatePdfMapping(jsonName, newSubjectId) {
+    if (newSubjectId === "__new__") {
+      createNewSubjectForPdf(jsonName);
+      return;
+    }
+    setPdfPreview((prev) => {
+      if (!prev) return null;
+      const { materias, questions, allSubjects } = prev;
+      const updatedMaterias = { ...materias };
+      updatedMaterias[jsonName] = { ...updatedMaterias[jsonName], mappedSubjectId: newSubjectId, isNew: false };
+      const updatedQuestions = questions.map((q) =>
+        q.jsonName === jsonName ? { ...q, subjectId: newSubjectId } : q
+      );
+      return { materias: updatedMaterias, questions: updatedQuestions, allSubjects };
+    });
+  }
+
+  function createNewSubjectForPdf(jsonName) {
+    setPdfPreview((prev) => {
+      if (!prev) return null;
+      const { materias, questions, allSubjects } = prev;
+      const newId = uid();
+      const color = PALETTE[allSubjects.length % PALETTE.length];
+      const newSubject = { id: newId, name: jsonName, color, icon: null };
+      const updatedMaterias = { ...materias };
+      updatedMaterias[jsonName] = { mappedSubjectId: newId, isNew: true, color, icon: null };
+      const updatedQuestions = questions.map((q) =>
+        q.jsonName === jsonName ? { ...q, subjectId: newId } : q
+      );
+      return { materias: updatedMaterias, questions: updatedQuestions, allSubjects: [...allSubjects, newSubject] };
+    });
+  }
+
+  function applyPdfPreview(preview) {
+    if (!preview) return 0;
+    const { materias, questions, allSubjects } = preview;
+    setSubjects(allSubjects);
+    const toAdd = questions.map((q) => ({
+      id: uid(),
+      source: q.source,
+      subjectId: q.subjectId,
+      topic: q.topic,
+      statement: q.statement,
+      alternatives: q.alternatives,
+      answer: q.answer,
       difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
     }));
     setQuestions((prev) => [...toAdd, ...prev]);
-    setExamText(""); setKeyText(""); setPreview(null);
-    setTab("questoes");
+    return toAdd.length;
   }
 
-  function mergeQuestionsJson(data) {
+  function confirmPdfPreview() {
+    if (!pdfPreview) return;
+    const count = applyPdfPreview(pdfPreview);
+    
+    // Salva a prova completa com PDFs
+    const examRecord = {
+      id: uid(),
+      title: source.trim() || "Prova importada",
+      date: new Date().toISOString().slice(0, 10),
+      examPdfDataUrl,
+      keyPdfDataUrl,
+      questionCount: count,
+      annotations: [], // para desenhos/balões de texto
+    };
+    setSavedExams((prev) => [examRecord, ...prev]);
+    
+    setExamText(""); setKeyText(""); setExamPdfDataUrl(null); setKeyPdfDataUrl(null);
+    setPdfPreview(null); setSource("");
+    setTab("provas");
+    return count;
+  }
+
+  function cancelPdfPreview() {
+    setPdfPreview(null);
+    setExamText(""); setKeyText(""); setExamPdfDataUrl(null); setKeyPdfDataUrl(null);
+    setSource("");
+  }
+
+  function confirmImport() {
+    if (!pdfPreview) return;
+    const count = confirmPdfPreview();
+    // confirmPdfPreview já faz tudo: adiciona questões, salva prova, limpa estado, muda aba
+  }
+
+  function buildJsonPreview(data) {
     if (!data || !Array.isArray(data.questoes)) throw new Error("formato inválido");
     let currentSubjects = subjects;
-    const toAdd = [];
+    const materiaMap = {}; // jsonName -> { mappedSubjectId, isNew, color, icon }
+    const questions = [];
+
     data.questoes.forEach((q) => {
       if (!q || !q.materia || !q.enunciado) return;
-      let subj = currentSubjects.find((s) => s.name.toLowerCase().trim() === String(q.materia).toLowerCase().trim());
-      if (!subj) {
-        subj = { id: uid(), name: String(q.materia).trim(), color: PALETTE[currentSubjects.length % PALETTE.length], icon: null };
-        currentSubjects = [...currentSubjects, subj];
+      const jsonName = String(q.materia).trim();
+
+      if (!materiaMap[jsonName]) {
+        // tenta achar matéria existente com match exato (case-insensitive)
+        const existing = currentSubjects.find((s) => s.name.toLowerCase() === jsonName.toLowerCase());
+        if (existing) {
+          materiaMap[jsonName] = { mappedSubjectId: existing.id, isNew: false, color: existing.color, icon: existing.icon };
+        } else {
+          // nova matéria sugerida
+          const newId = uid();
+          const color = PALETTE[currentSubjects.length % PALETTE.length];
+          materiaMap[jsonName] = { mappedSubjectId: newId, isNew: true, color, icon: null };
+          currentSubjects = [...currentSubjects, { id: newId, name: jsonName, color, icon: null }];
+        }
       }
+
       const alts = {};
       if (q.alternativas && typeof q.alternativas === "object") {
         Object.entries(q.alternativas).forEach(([k, v]) => { alts[k.toUpperCase()] = String(v); });
       }
-      toAdd.push({
-        id: uid(), source: (q.banca || "IA").trim(), subjectId: subj.id, topic: "",
-        statement: String(q.enunciado).trim(), alternatives: alts,
+      questions.push({
+        jsonName,
+        subjectId: materiaMap[jsonName].mappedSubjectId,
+        source: (q.banca || "IA").trim(),
+        topic: "",
+        statement: String(q.enunciado).trim(),
+        alternatives: alts,
         answer: q.gabarito ? String(q.gabarito).toUpperCase().trim() : null,
         difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
       });
     });
-    setSubjects(currentSubjects);
+
+    return { materias: materiaMap, questions, allSubjects: currentSubjects };
+  }
+
+  function applyJsonPreview(preview) {
+    if (!preview) return 0;
+    const { materias, questions, allSubjects } = preview;
+    setSubjects(allSubjects);
+    const toAdd = questions.map((q) => ({
+      id: uid(),
+      source: q.source,
+      subjectId: q.subjectId,
+      topic: q.topic,
+      statement: q.statement,
+      alternatives: q.alternatives,
+      answer: q.answer,
+      difficulty: null, userAnswer: null, correct: null, attempts: 0, errors: 0,
+    }));
     setQuestions((prev) => [...toAdd, ...prev]);
+    setJsonPreview(null);
+    setJsonText("");
     return toAdd.length;
   }
 
   function importJsonPasted() {
     try {
       const data = JSON.parse(jsonText);
-      const count = mergeQuestionsJson(data);
-      setJsonMsg(`${count} questão(ões) importada(s) com sucesso.`);
-      setJsonText("");
+      const preview = buildJsonPreview(data);
+      setJsonPreview(preview);
+      setJsonMsg(`${preview.questions.length} questão(ões) encontradas — confira o mapeamento de matérias abaixo.`);
     } catch (e) {
       setJsonMsg("JSON inválido — confira o formato esperado abaixo.");
     }
@@ -2474,12 +3793,58 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
     try {
       const text = await file.text();
       const data = JSON.parse(text);
-      const count = mergeQuestionsJson(data);
-      setJsonMsg(`${count} questão(ões) importada(s) com sucesso.`);
+      const preview = buildJsonPreview(data);
+      setJsonPreview(preview);
+      setJsonMsg(`${preview.questions.length} questão(ões) encontradas — confira o mapeamento de matérias abaixo.`);
     } catch (err) {
       setJsonMsg("Não consegui ler esse arquivo JSON.");
     }
     e.target.value = "";
+  }
+
+  function confirmJsonPreview() {
+    if (!jsonPreview) return;
+    const count = applyJsonPreview(jsonPreview);
+    setJsonMsg(`${count} questão(ões) importada(s) com sucesso.`);
+  }
+
+  function cancelJsonPreview() {
+    setJsonPreview(null);
+    setJsonMsg("");
+  }
+
+  function updateJsonMapping(jsonName, newSubjectId) {
+    if (newSubjectId === "__new__") {
+      createNewSubjectForJson(jsonName);
+      return;
+    }
+    setJsonPreview((prev) => {
+      if (!prev) return null;
+      const { materias, questions, allSubjects } = prev;
+      const updatedMaterias = { ...materias };
+      updatedMaterias[jsonName] = { ...updatedMaterias[jsonName], mappedSubjectId: newSubjectId, isNew: false };
+      // remapear questions
+      const updatedQuestions = questions.map((q) =>
+        q.jsonName === jsonName ? { ...q, subjectId: newSubjectId } : q
+      );
+      return { materias: updatedMaterias, questions: updatedQuestions, allSubjects };
+    });
+  }
+
+  function createNewSubjectForJson(jsonName) {
+    setJsonPreview((prev) => {
+      if (!prev) return null;
+      const { materias, questions, allSubjects } = prev;
+      const newId = uid();
+      const color = PALETTE[allSubjects.length % PALETTE.length];
+      const newSubject = { id: newId, name: jsonName, color, icon: null };
+      const updatedMaterias = { ...materias };
+      updatedMaterias[jsonName] = { mappedSubjectId: newId, isNew: true, color, icon: null };
+      const updatedQuestions = questions.map((q) =>
+        q.jsonName === jsonName ? { ...q, subjectId: newId } : q
+      );
+      return { materias: updatedMaterias, questions: updatedQuestions, allSubjects: [...allSubjects, newSubject] };
+    });
   }
 
   function copyJsonFormat() {
@@ -2533,7 +3898,7 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
         </div>
       </Card>
 
-      {preview && preview.length === 0 && (
+      {pdfPreview && pdfPreview.questions.length === 0 && (
         <Card>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: "var(--danger)" }}>Nenhuma questão encontrada</div>
           <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
@@ -2545,48 +3910,72 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
         </Card>
       )}
 
-      {preview && preview.length > 0 && (
+      {pdfPreview && pdfPreview.questions.length > 0 && (
         <Card>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Pré-visualização</div>
           <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
-            {preview.length} questões encontradas · {okCount} com alternativas reconhecidas · {withAnswerCount} com gabarito cruzado
+            {pdfPreview.questions.length} questões encontradas · {pdfPreview.questions.filter(q => q.hasAlts).length} com alternativas reconhecidas · {pdfPreview.questions.filter(q => q.hasAlts && q.answer).length} com gabarito cruzado
           </div>
 
-          {subjects.length > 1 && (
-            <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, marginBottom: 10 }}>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
-                Prova com mais de uma matéria? Atribua um intervalo de questões por vez:
-              </div>
-              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ fontSize: 12, color: "var(--muted)" }}>Da questão</span>
-                <input type="number" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} style={{ ...input, width: 64 }} />
-                <span style={{ fontSize: 12, color: "var(--muted)" }}>até</span>
-                <input type="number" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} style={{ ...input, width: 64 }} />
-                <select value={rangeSubject} onChange={(e) => setRangeSubject(e.target.value)} style={input}>
-                  {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-                <button onClick={applyRangeSubject} style={ghostBtn}>Aplicar</button>
-              </div>
-              {subjectsUsed.length > 0 && (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                  {subjectsUsed.map((s) => (
-                    <span key={s.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--muted)" }}>
-                      <SubjectMark subject={s} size={6} /> {s.name}
-                    </span>
-                  ))}
-                </div>
-              )}
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+              Prova com mais de uma matéria ou assunto? Atribua matéria + assunto por intervalo de questões:
             </div>
-          )}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Da questão</span>
+              <input type="number" value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} style={{ ...input, width: 64 }} />
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>até</span>
+              <input type="number" value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} style={{ ...input, width: 64 }} />
+              <select value={rangeSubject} onChange={(e) => setRangeSubject(e.target.value)} style={input}>
+                {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <input value={rangeTopic} onChange={(e) => setRangeTopic(e.target.value)} placeholder="Assunto (ex: Cinemática)" style={{ ...input, flex: 1, minWidth: 140 }} />
+              <button onClick={applyRangeSubject} style={ghostBtn}>Aplicar</button>
+            </div>
+          </div>
+
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, marginBottom: 10, maxHeight: 300, overflowY: "auto" }}>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>Mapeamento de matérias</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {Object.entries(pdfPreview.materias).map(([jsonName, mapping]) => {
+                const subject = pdfPreview.allSubjects.find((s) => s.id === mapping.mappedSubjectId);
+                const qCount = pdfPreview.questions.filter((q) => q.jsonName === jsonName).length;
+                return (
+                  <div key={jsonName} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: 8, background: "var(--bg)", borderRadius: 6 }}>
+                    <SubjectMark subject={subject} size={8} />
+                    <span style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 120 }}>{jsonName}</span>
+                    <span style={{ fontSize: 11, color: "var(--muted)", background: mapping.isNew ? "var(--ok)22" : "var(--accent)22", border: `1px solid ${mapping.isNew ? "var(--ok)" : "var(--accent)"}`, borderRadius: 4, padding: "2px 6px" }}>
+                      {mapping.isNew ? "Nova matéria" : "Existente"}
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>{qCount} questão{qCount === 1 ? "" : "ões"}</span>
+                    <select
+                      value={mapping.mappedSubjectId}
+                      onChange={(e) => updatePdfMapping(jsonName, e.target.value)}
+                      style={{ ...input, minWidth: 180, fontSize: 12, padding: "5px 8px" }}
+                    >
+                      {pdfPreview.allSubjects.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} {s.id === mapping.mappedSubjectId && mapping.isNew ? " (nova)" : ""}
+                        </option>
+                      ))}
+                      <option value="__new__">➕ Criar como nova matéria</option>
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
-            {preview.map((q) => {
-              const subj = subjects.find((s) => s.id === q.subjectId);
+            {pdfPreview.questions.map((q, idx) => {
+              const subj = pdfPreview.allSubjects.find((s) => s.id === q.subjectId);
               return (
-                <div key={q.num} style={{ border: "1px solid var(--line)", borderRadius: 6, padding: "8px 10px", fontSize: 12.5, background: q.hasAlts ? "var(--surface2)" : "transparent" }}>
+                <div key={idx} style={{ border: "1px solid var(--line)", borderRadius: 6, padding: "8px 10px", fontSize: 12.5, background: q.hasAlts ? "var(--surface2)" : "transparent" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
-                      Questão {q.num} {subjects.length > 1 && subj && <SubjectMark subject={subj} size={6} />}
+                    <span style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                      Questão {q.num} {subj && <SubjectMark subject={subj} size={6} />}
+                      {subj && <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: 11.5 }}>{subj.name}</span>}
+                      {q.topic ? <span style={{ fontWeight: 600, color: "var(--accent2)", fontSize: 11, background: "var(--accent2)22", borderRadius: 4, padding: "1px 6px" }}>{q.topic}</span> : null}
                     </span>
                     <span style={{ color: q.hasAlts ? "var(--ok)" : "var(--danger)", fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 }}>
                       {q.hasAlts ? (q.answer ? `gabarito: ${q.answer} · ${q.altCount} alts` : `sem gabarito · ${q.altCount} alts`) : "alternativas não reconhecidas"}
@@ -2598,8 +3987,8 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
             })}
           </div>
           <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-            <button onClick={confirmImport} style={primaryBtn} disabled={okCount === 0}>Adicionar {okCount} questões ao banco</button>
-            <button onClick={() => setPreview(null)} style={ghostBtn}>Descartar</button>
+            <button onClick={confirmPdfPreview} style={primaryBtn} disabled={pdfPreview.questions.filter(q => q.hasAlts).length === 0}>Confirmar e importar {pdfPreview.questions.filter(q => q.hasAlts).length} questões</button>
+            <button onClick={cancelPdfPreview} style={{ ...ghostBtn, borderColor: "var(--danger)", color: "var(--danger)" }}>Cancelar</button>
           </div>
         </Card>
       )}
@@ -2609,18 +3998,67 @@ function Importer({ subjects, setSubjects, setQuestions, setTab }) {
         <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
           Peça pra uma IA gerar questões nesse formato (útil pra puxar questões de bancas específicas, gerar
           questões novas de treino, ou colar algo que você já tem estruturado) — cole ou suba o arquivo aqui.
-          Matérias novas são criadas automaticamente, cada questão pode ter sua própria matéria e banca.
+          Cada questão tem sua banca (source) e você escolhe para qual matéria vai cada uma.
         </div>
-        <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} placeholder="Cole aqui o JSON gerado pela IA..."
-          style={{ ...input, width: "100%", height: 100, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical", marginBottom: 8 }} />
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-          <button onClick={importJsonPasted} style={primaryBtn} disabled={!jsonText.trim()}>Importar texto colado</button>
-          <label style={{ ...ghostBtn, display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
-            Importar arquivo .json
-            <input type="file" accept=".json" onChange={importJsonFile} style={{ display: "none" }} />
-          </label>
-        </div>
-        {jsonMsg && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{jsonMsg}</div>}
+
+        {jsonPreview ? (
+          <React.Fragment>
+            <div style={{ fontSize: 12.5, color: "var(--accent2)", marginBottom: 10, fontWeight: 600 }}>
+              {jsonPreview.questions.length} questão(ões) prontas para importar
+            </div>
+
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, marginBottom: 10, maxHeight: 300, overflowY: "auto" }}>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>Mapeamento de matérias</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {Object.entries(jsonPreview.materias).map(([jsonName, mapping]) => {
+                  const subject = jsonPreview.allSubjects.find((s) => s.id === mapping.mappedSubjectId);
+                  const qCount = jsonPreview.questions.filter((q) => q.jsonName === jsonName).length;
+                  return (
+                    <div key={jsonName} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: 8, background: "var(--bg)", borderRadius: 6 }}>
+                      <SubjectMark subject={subject} size={8} />
+                      <span style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 120 }}>{jsonName}</span>
+                      <span style={{ fontSize: 11, color: "var(--muted)", background: mapping.isNew ? "var(--ok)22" : "var(--accent)22", border: `1px solid ${mapping.isNew ? "var(--ok)" : "var(--accent)"}`, borderRadius: 4, padding: "2px 6px" }}>
+                        {mapping.isNew ? "Nova matéria" : "Existente"}
+                      </span>
+                      <span style={{ fontSize: 11, color: "var(--muted)" }}>{qCount} questão{qCount === 1 ? "" : "ões"}</span>
+                      <select
+                        value={mapping.mappedSubjectId}
+                        onChange={(e) => updateJsonMapping(jsonName, e.target.value)}
+                        style={{ ...input, minWidth: 180, fontSize: 12, padding: "5px 8px" }}
+                      >
+                        {jsonPreview.allSubjects.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} {s.id === mapping.mappedSubjectId && mapping.isNew ? " (nova)" : ""}
+                          </option>
+                        ))}
+                        <option value="__new__">➕ Criar como nova matéria</option>
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button onClick={confirmJsonPreview} style={primaryBtn}>Confirmar e importar</button>
+              <button onClick={cancelJsonPreview} style={{ ...ghostBtn, borderColor: "var(--danger)", color: "var(--danger)" }}>Cancelar</button>
+            </div>
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
+            <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} placeholder="Cole aqui o JSON gerado pela IA..."
+              style={{ ...input, width: "100%", height: 100, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical", marginBottom: 8 }} />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <button onClick={importJsonPasted} style={primaryBtn} disabled={!jsonText.trim()}>Analisar JSON</button>
+              <label style={{ ...ghostBtn, display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+                Importar arquivo .json
+                <input type="file" accept=".json" onChange={importJsonFile} style={{ display: "none" }} />
+              </label>
+            </div>
+            {jsonMsg && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{jsonMsg}</div>}
+          </React.Fragment>
+        )}
+
         <button onClick={() => setShowJsonFormat((v) => !v)} style={{ ...ghostBtn, fontSize: 11.5, padding: "4px 8px" }}>
           {showJsonFormat ? "Ocultar formato esperado" : "Ver formato esperado"}
         </button>
@@ -2661,6 +4099,7 @@ function questionAccuracy(qs) {
 function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEmoji }) {
   const [filterSubject, setFilterSubject] = useState("all");
   const [filterBanca, setFilterBanca] = useState("all");
+  const [filterTopic, setFilterTopic] = useState("all");
   const [manualOpen, setManualOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [practiceQueue, setPracticeQueue] = useState(null);
@@ -2670,9 +4109,23 @@ function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEm
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [questions]);
 
+  const topicos = useMemo(() => {
+    const set = new Set(
+      questions
+        .filter((q) =>
+          (filterSubject === "all" || q.subjectId === filterSubject) &&
+          (filterBanca === "all" || (q.source || "").trim() === filterBanca)
+        )
+        .map((q) => (q.topic || "").trim())
+        .filter(Boolean)
+    );
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [questions, filterSubject, filterBanca]);
+
   const filtered = questions.filter((q) =>
     (filterSubject === "all" || q.subjectId === filterSubject) &&
-    (filterBanca === "all" || (q.source || "").trim() === filterBanca)
+    (filterBanca === "all" || (q.source || "").trim() === filterBanca) &&
+    (filterTopic === "all" || (q.topic || "").trim() === filterTopic)
   );
 
   function startPractice(count) {
@@ -2759,14 +4212,20 @@ function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEm
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>Banco de questões · {filtered.length}</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <select value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)} style={input}>
+            <select value={filterSubject} onChange={(e) => { setFilterSubject(e.target.value); setFilterTopic("all"); }} style={input}>
               <option value="all">Todas as matérias</option>
               {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
             {bancas.length > 0 && (
-              <select value={filterBanca} onChange={(e) => setFilterBanca(e.target.value)} style={input}>
+              <select value={filterBanca} onChange={(e) => { setFilterBanca(e.target.value); setFilterTopic("all"); }} style={input}>
                 <option value="all">Todas as bancas</option>
                 {bancas.map((b) => <option key={b} value={b}>{b}</option>)}
+              </select>
+            )}
+            {topicos.length > 0 && (
+              <select value={filterTopic} onChange={(e) => setFilterTopic(e.target.value)} style={input}>
+                <option value="all">Todos os assuntos</option>
+                {topicos.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
             )}
           </div>
@@ -2775,6 +4234,7 @@ function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEm
           <button onClick={() => startPractice(5)} style={primaryBtn} disabled={filtered.filter((q) => q.answer).length === 0}>Praticar 5</button>
           <button onClick={() => startPractice(10)} style={ghostBtn} disabled={filtered.filter((q) => q.answer).length === 0}>Praticar 10</button>
           <button onClick={() => setManualOpen((v) => !v)} style={ghostBtn}>{manualOpen ? "Cancelar" : "Adicionar manualmente"}</button>
+          <button onClick={() => setTab("provas")} style={ghostBtn}>📁 Ver provas salvas</button>
         </div>
       </Card>
 
@@ -2786,8 +4246,9 @@ function QuestionBank({ subjects, questions, setQuestions, setTab, celebrationEm
           return (
             <Card key={q.id} style={{ padding: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted)", flexWrap: "wrap" }}>
                   <SubjectMark subject={subj} /> {subj?.name || "—"} <span>· {q.source}</span>
+                  {q.topic ? <span style={{ color: "var(--accent2)", fontWeight: 600 }}>· {q.topic}</span> : null}
                 </div>
                 <button onClick={() => removeQuestion(q.id)} style={iconBtn} aria-label="Remover questão">×</button>
               </div>
@@ -3021,6 +4482,590 @@ function AgnesSettings({ backendUrl, setBackendUrl }) {
         </div>
       )}
     </Card>
+  );
+}
+
+// ---------- Saved Exams (Provas Salvas) ----------
+function ExamPagePin({ pin, disarmTick, onMoveEnd, onEdit, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(pin.text);
+  const dragRef = useRef(null);
+  const suppressClick = useRef(false);
+
+  // toque em outro lugar da página desarma a mão deste balão
+  const firstTick = useRef(true);
+  useEffect(() => {
+    if (firstTick.current) { firstTick.current = false; return; }
+    setMoving(false);
+    dragRef.current = null;
+  }, [disarmTick]);
+
+  function onPointerDown(e) {
+    // só inicia arrasto se a mão estiver armada; botões/textarea barram antes (stopPropagation)
+    if (!moving || editing) return;
+    const el = e.currentTarget;
+    try { el.setPointerCapture(e.pointerId); } catch (err) {}
+    dragRef.current = { id: e.pointerId, moved: false, sx: e.clientX, sy: e.clientY };
+  }
+  function onPointerMove(e) {
+    if (!moving || !dragRef.current || dragRef.current.id !== e.pointerId) return;
+    const d = dragRef.current;
+    if (!d.moved && Math.abs(e.clientX - d.sx) + Math.abs(e.clientY - d.sy) > 6) d.moved = true;
+    if (!d.moved) return;
+    const parent = e.currentTarget.parentElement;
+    const rect = parent.getBoundingClientRect();
+    let nx = (e.clientX - rect.left) / rect.width;
+    let ny = (e.clientY - rect.top) / rect.height;
+    nx = Math.max(0.02, Math.min(0.98, nx));
+    ny = Math.max(0.02, Math.min(0.98, ny));
+    onMoveEnd(pin.id, nx, ny);
+  }
+  function onPointerUp(e) {
+    if (!dragRef.current) return;
+    const wasMoved = dragRef.current.moved;
+    dragRef.current = null;
+    if (wasMoved) {
+      suppressClick.current = true;
+      setTimeout(() => { suppressClick.current = false; }, 80);
+    }
+  }
+
+  function handleBodyClick(e) {
+    e.stopPropagation();
+    if (suppressClick.current) return;
+    if (moving || editing) return;
+    setOpen((v) => !v);
+  }
+
+  function startEdit(e) {
+    if (e) e.stopPropagation();
+    setDraft(pin.text || "");
+    setEditing(true);
+    setOpen(true);
+    setMoving(false);
+    dragRef.current = null;
+  }
+  function confirmEdit(e) {
+    if (e) e.stopPropagation();
+    onEdit(pin.id, draft);
+    setEditing(false);
+  }
+  function cancelEdit(e) {
+    if (e) e.stopPropagation();
+    setEditing(false);
+  }
+  function handleDelete(e) {
+    if (e) e.stopPropagation();
+    onDelete(pin.id);
+  }
+  function toggleMove(e) {
+    if (e) e.stopPropagation();
+    dragRef.current = null;
+    setMoving((v) => !v);
+  }
+  // barra o toque antes de chegar no arrasto do balão (evita captura indevida)
+  function barTouch(e) { e.stopPropagation(); }
+
+  const color = pin.color || "#E8A33D";
+
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={() => { dragRef.current = null; }}
+      onClick={handleBodyClick}
+      style={{
+        position: "absolute", left: (pin.x * 100) + "%", top: (pin.y * 100) + "%",
+        transform: "translate(-50%, -100%)",
+        touchAction: moving ? "none" : "auto",
+        cursor: moving ? "grabbing" : "pointer",
+        zIndex: open || moving ? 8 : 5, maxWidth: "72%",
+        outline: moving ? `2px dashed ${color}` : "none",
+        outlineOffset: 2, borderRadius: 10,
+        userSelect: "none", WebkitUserSelect: "none",
+      }}
+    >
+      <div style={{
+        background: "#14181C", border: `2px solid ${color}`, borderRadius: "10px 10px 10px 2px",
+        padding: "6px 8px", fontSize: 12.5, lineHeight: 1.4, color: "var(--text)",
+        boxShadow: "0 3px 10px rgba(0,0,0,0.5)", minWidth: 90,
+        userSelect: "none", WebkitUserSelect: "none",
+      }}>
+        {editing ? (
+          <div onClick={(e) => e.stopPropagation()} onPointerDown={barTouch}>
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              autoFocus
+              rows={2}
+              style={{ ...input, width: "100%", fontSize: 12.5, resize: "vertical", userSelect: "text", WebkitUserSelect: "text" }}
+            />
+            <div style={{ display: "flex", gap: 6, marginTop: 4 }} onPointerDown={barTouch}>
+              <button onPointerDown={barTouch} onClick={confirmEdit} style={{ ...primaryBtn, padding: "4px 10px", fontSize: 12 }}>OK</button>
+              <button onPointerDown={barTouch} onClick={cancelEdit} style={{ ...ghostBtn, padding: "4px 10px", fontSize: 12 }}>Cancelar</button>
+            </div>
+          </div>
+        ) : (
+          <React.Fragment>
+            <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{pin.text || "(toque para abrir)"}</div>
+            {open && (
+              <div style={{ display: "flex", gap: 4, marginTop: 6, borderTop: "1px solid var(--line)", paddingTop: 6 }} onClick={(e) => e.stopPropagation()} onPointerDown={barTouch}>
+                <button
+                  onPointerDown={barTouch}
+                  onClick={toggleMove}
+                  title={moving ? "Toque para fixar (parar de mover)" : "Mover balão"}
+                  style={moving ? { ...primaryBtn, padding: "4px 8px", fontSize: 13 } : { ...ghostBtn, padding: "4px 8px", fontSize: 13 }}
+                >
+                  {moving ? "🖐️ fixar" : "🖐️ mover"}
+                </button>
+                <button onPointerDown={barTouch} onClick={startEdit} title="Escrever no balão" style={{ ...ghostBtn, padding: "4px 8px", fontSize: 13 }}>✏️</button>
+                <button onPointerDown={barTouch} onClick={handleDelete} title="Tirar balão" style={{ ...ghostBtn, padding: "4px 8px", fontSize: 13, borderColor: "var(--danger)", color: "var(--danger)" }}>🗑️</button>
+              </div>
+            )}
+          </React.Fragment>
+        )}
+        {moving && !editing && (
+          <div style={{ fontSize: 10.5, color: color, marginTop: 4, fontWeight: 700 }}>arrastando... toque em 🖐️ fixar</div>
+        )}
+      </div>
+      <div style={{ width: 2, height: 14, background: color, margin: "0 auto" }} />
+      <div style={{ width: 10, height: 10, borderRadius: "50%", background: color, margin: "0 auto", border: "2px solid #14181C" }} />
+    </div>
+  );
+}
+
+function ExamPageView({ pageInfo, pageIndex, strokes, pins, tool, strokeColor, strokeWidth, disarmTick, onDisarm, onStrokeEnd, onEraseAt, onPinAdd, onPinMoveEnd, onPinEdit, onPinDelete }) {
+  const baseRef = useRef(null);
+  const overRef = useRef(null);
+  const curStroke = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const canvas = baseRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        await pageInfo.page.render({ canvasContext: ctx, viewport: pageInfo.viewport }).promise;
+        if (!cancelled) redrawOverlay();
+      } catch (e) {}
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageInfo]);
+
+  useEffect(() => { redrawOverlay(); });
+
+  function redrawOverlay() {
+    const canvas = overRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    (strokes || []).forEach((st) => {
+      if (!st.points || st.points.length === 0) return;
+      ctx.strokeStyle = st.color;
+      ctx.lineWidth = st.width;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      st.points.forEach((p, i) => {
+        const px = p[0] * canvas.width;
+        const py = p[1] * canvas.height;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      if (st.points.length === 1) {
+        const px = st.points[0][0] * canvas.width;
+        const py = st.points[0][1] * canvas.height;
+        ctx.fillStyle = st.color;
+        ctx.beginPath();
+        ctx.arc(px, py, st.width / 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.stroke();
+      }
+    });
+  }
+
+  function toNorm(e) {
+    const canvas = overRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] && e.touches[0].clientX);
+    const cy = e.clientY !== undefined ? e.clientY : (e.touches && e.touches[0] && e.touches[0].clientY);
+    return [
+      Math.max(0, Math.min(1, (cx - rect.left) / rect.width)),
+      Math.max(0, Math.min(1, (cy - rect.top) / rect.height)),
+    ];
+  }
+
+  function handleDown(e) {
+    if (onDisarm) onDisarm();
+    if (tool === "move") return;
+    e.preventDefault();
+    const [nx, ny] = toNorm(e);
+    if (tool === "text") {
+      onPinAdd(pageIndex, nx, ny);
+      return;
+    }
+    if (tool === "erase") {
+      onEraseAt(pageIndex, nx, ny);
+      curStroke.current = { erasing: true };
+      return;
+    }
+    curStroke.current = { color: strokeColor, width: strokeWidth * 1.5, points: [[nx, ny]] };
+  }
+
+  function handleMove(e) {
+    if (!curStroke.current || tool === "move" || tool === "text") return;
+    e.preventDefault();
+    const [nx, ny] = toNorm(e);
+    if (curStroke.current.erasing) {
+      onEraseAt(pageIndex, nx, ny);
+      return;
+    }
+    const pts = curStroke.current.points;
+    const last = pts[pts.length - 1];
+    const dx = (nx - last[0]) * overRef.current.width;
+    const dy = (ny - last[1]) * overRef.current.height;
+    if (dx * dx + dy * dy < 4) return;
+    pts.push([nx, ny]);
+    const ctx = overRef.current.getContext("2d");
+    ctx.strokeStyle = curStroke.current.color;
+    ctx.lineWidth = curStroke.current.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(last[0] * overRef.current.width, last[1] * overRef.current.height);
+    ctx.lineTo(nx * overRef.current.width, ny * overRef.current.height);
+    ctx.stroke();
+  }
+
+  function handleUp() {
+    if (!curStroke.current) return;
+    if (!curStroke.current.erasing && curStroke.current.points.length > 0) {
+      onStrokeEnd(pageIndex, { id: uid(), color: curStroke.current.color, width: curStroke.current.width, points: curStroke.current.points });
+    }
+    curStroke.current = null;
+  }
+
+  return (
+    <div style={{ position: "relative", width: "100%", marginBottom: 12, border: "1px solid var(--line)", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+      <canvas ref={baseRef} width={pageInfo.width} height={pageInfo.height} style={{ width: "100%", display: "block" }} />
+      <canvas
+        ref={overRef}
+        width={pageInfo.width}
+        height={pageInfo.height}
+        onPointerDown={handleDown}
+        onPointerMove={handleMove}
+        onPointerUp={handleUp}
+        onPointerLeave={handleUp}
+        onPointerCancel={handleUp}
+        style={{
+          position: "absolute", inset: 0, width: "100%", height: "100%",
+          touchAction: tool === "move" ? "auto" : "none",
+          cursor: tool === "pen" ? "crosshair" : tool === "erase" ? "cell" : tool === "text" ? "text" : "default",
+        }}
+      />
+      {(pins || []).map((p) => (
+        <ExamPagePin key={p.id} pin={p} disarmTick={disarmTick} onMoveEnd={(id, x, y) => onPinMoveEnd(pageIndex, id, x, y)} onEdit={(id, text) => onPinEdit(pageIndex, id, text)} onDelete={(id) => onPinDelete(pageIndex, id)} />
+      ))}
+      <div style={{ position: "absolute", left: 8, bottom: 6, fontSize: 10.5, color: "rgba(255,255,255,0.85)", background: "rgba(0,0,0,0.55)", borderRadius: 4, padding: "1px 7px", pointerEvents: "none" }}>
+        pág. {pageIndex + 1}
+      </div>
+    </div>
+  );
+}
+
+function SavedExams({ exams, setExams, subjects }) {
+  const [editingId, setEditingId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [viewingExam, setViewingExam] = useState(null);
+  const [pdfTab, setPdfTab] = useState("prova");
+  const [tool, setTool] = useState("move");
+  const [strokeColor, setStrokeColor] = useState("#E8A33D");
+  const [strokeWidth, setStrokeWidth] = useState(2);
+  const [pageNotes, setPageNotes] = useState({});
+  const [disarmTick, setDisarmTick] = useState(0);
+  const [pdfPages, setPdfPages] = useState([]);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfError, setPdfError] = useState("");
+
+  function formatDate(dateStr) {
+    try {
+      return new Date(dateStr + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+    } catch (e) { return dateStr; }
+  }
+
+  function countMarks(exam) {
+    const pn = exam.pageNotes || {};
+    let strokes = 0, pins = 0;
+    Object.values(pn).forEach((v) => { strokes += (v.strokes || []).length; pins += (v.pins || []).length; });
+    const legacy = (exam.textNotes || exam.annotations || []).length;
+    return { strokes, pins: pins + legacy };
+  }
+
+  function deleteExam(id) {
+    if (window.confirm("Excluir esta prova salva? As questões importadas no banco permanecerão.")) {
+      setExams((prev) => prev.filter((e) => e.id !== id));
+    }
+  }
+
+  function startRename(exam) {
+    setEditingId(exam.id);
+    setEditTitle(exam.title || "");
+  }
+
+  function saveRename(id) {
+    setExams((prev) => prev.map((e) => (e.id === id ? { ...e, title: editTitle.trim() || e.title } : e)));
+    setEditingId(null);
+  }
+
+  function migrateLegacy(exam) {
+    if (exam.pageNotes) return exam.pageNotes;
+    const legacy = exam.textNotes || exam.annotations || [];
+    if (!legacy.length) return {};
+    return {
+      "prova:0": {
+        strokes: [],
+        pins: legacy.map((n, i) => ({
+          id: n.id || uid(),
+          x: 0.12 + ((i * 7) % 4) * 0.22,
+          y: 0.08 + Math.floor(((i * 7) % 16) / 4) * 0.14,
+          text: n.text || "",
+          color: n.color || "#E8A33D",
+        })),
+      },
+    };
+  }
+
+  function openViewer(exam) {
+    setViewingExam(exam);
+    setPdfTab(exam.examPdfDataUrl ? "prova" : "gabarito");
+    setPageNotes(migrateLegacy(exam));
+    setTool("move");
+  }
+
+  function persistAndClose() {
+    if (viewingExam) {
+      const snapshot = pageNotes;
+      setExams((prev) => prev.map((e) => (e.id === viewingExam.id ? { ...e, pageNotes: snapshot } : e)));
+    }
+    setViewingExam(null);
+    setPageNotes({});
+    setPdfPages([]);
+    setPdfError("");
+  }
+
+  function getPage(pageIndex) {
+    return pageNotes[pageIndex] || { strokes: [], pins: [] };
+  }
+
+  function setPage(pageIndex, patch) {
+    setPageNotes((prev) => ({ ...prev, [pageIndex]: { ...getPageRef(prev, pageIndex), ...patch } }));
+  }
+
+  function getPageRef(pn, pageIndex) {
+    return pn[pageIndex] || { strokes: [], pins: [] };
+  }
+
+  function handleStrokeEnd(pageIndex, stroke) {
+    setPageNotes((prev) => {
+      const cur = getPageRef(prev, pageIndex);
+      return { ...prev, [pageIndex]: { ...cur, strokes: [...cur.strokes, stroke] } };
+    });
+  }
+
+  function handleEraseAt(pageIndex, nx, ny) {
+    const R = 0.03;
+    setPageNotes((prev) => {
+      const cur = getPageRef(prev, pageIndex);
+      if (!cur.strokes.length) return prev;
+      const kept = cur.strokes.filter((st) =>
+        !(st.points || []).some((p) => {
+          const dx = p[0] - nx, dy = (p[1] - ny) * 1.4;
+          return dx * dx + dy * dy < R * R;
+        })
+      );
+      if (kept.length === cur.strokes.length) return prev;
+      return { ...prev, [pageIndex]: { ...cur, strokes: kept } };
+    });
+  }
+
+  function handlePinAdd(pageIndex, nx, ny) {
+    const pin = { id: uid(), x: Math.max(0.05, Math.min(0.95, nx)), y: Math.max(0.05, Math.min(0.95, ny)), text: "Nova anotação", color: strokeColor };
+    setPageNotes((prev) => {
+      const cur = getPageRef(prev, pageIndex);
+      return { ...prev, [pageIndex]: { ...cur, pins: [...cur.pins, pin] } };
+    });
+    // carimbo único: depois de fixar um balão volta a navegar (evita criar vários sem querer)
+    setTool("move");
+  }
+
+  function handlePinMoveEnd(pageIndex, id, x, y) {
+    setPageNotes((prev) => {
+      const cur = getPageRef(prev, pageIndex);
+      return { ...prev, [pageIndex]: { ...cur, pins: cur.pins.map((p) => (p.id === id ? { ...p, x, y } : p)) } };
+    });
+  }
+
+  function handlePinEdit(pageIndex, id, text) {
+    setPageNotes((prev) => {
+      const cur = getPageRef(prev, pageIndex);
+      return { ...prev, [pageIndex]: { ...cur, pins: cur.pins.map((p) => (p.id === id ? { ...p, text } : p)) } };
+    });
+  }
+
+  function handlePinDelete(pageIndex, id) {
+    setPageNotes((prev) => {
+      const cur = getPageRef(prev, pageIndex);
+      return { ...prev, [pageIndex]: { ...cur, pins: cur.pins.filter((p) => p.id !== id) } };
+    });
+  }
+
+  useEffect(() => {
+    if (!viewingExam) return;
+    let cancelled = false;
+    setPdfPages([]);
+    setPdfError("");
+    setPdfLoading(true);
+    (async () => {
+      try {
+        const dataUrl = pdfTab === "prova" ? viewingExam.examPdfDataUrl : viewingExam.keyPdfDataUrl;
+        if (!dataUrl || dataUrl.indexOf(",") === -1) throw new Error("empty");
+        const mime = dataUrl.slice(0, dataUrl.indexOf(";"));
+        if (mime.indexOf("pdf") === -1) throw new Error("notpdf");
+        const bin = atob(dataUrl.split(",")[1]);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+        for (let p = 1; p <= pdf.numPages; p++) {
+          if (cancelled) return;
+          const pg = await pdf.getPage(p);
+          const vp = pg.getViewport({ scale: 1.5 });
+          if (cancelled) return;
+          setPdfPages((prev) => [...prev, { page: pg, width: Math.floor(vp.width), height: Math.floor(vp.height), viewport: vp }]);
+        }
+      } catch (e) {
+        if (!cancelled) setPdfError("Não consegui renderizar este arquivo como PDF — mas as questões importadas continuam no banco.");
+      } finally {
+        if (!cancelled) setPdfLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [viewingExam, pdfTab]);
+
+  if (!exams || exams.length === 0) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Card>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>📁 Provas Salvas</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            Importe provas PDF na aba <strong>Importar</strong> — elas aparecerão aqui com as páginas originais
+            para você desenhar rascunhos por cima e fixar balões de anotação onde quiser.
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>📁 Provas Salvas · {exams.length}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {exams.map((exam) => {
+            const marks = countMarks(exam);
+            return (
+              <div key={exam.id} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 12, background: "var(--surface2)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+                  {editingId === exam.id ? (
+                    <input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveRename(exam.id)} onBlur={() => saveRename(exam.id)} autoFocus style={{ ...input, flex: 1, minWidth: 150, fontWeight: 600, fontSize: 14 }} />
+                  ) : (
+                    <span style={{ flex: 1, fontWeight: 600, fontSize: 14, cursor: "pointer" }} onClick={() => startRename(exam)}>{exam.title}</span>
+                  )}
+                  <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>{formatDate(exam.date)}</span>
+                  <span style={{ fontSize: 12, color: "var(--accent2)", fontFamily: "'JetBrains Mono', monospace" }}>{exam.questionCount} questões</span>
+                  <button onClick={() => openViewer(exam)} style={primaryBtn} disabled={!exam.examPdfDataUrl && !exam.keyPdfDataUrl}>Abrir prova</button>
+                  {editingId !== exam.id && <button onClick={() => startRename(exam)} style={iconBtn} aria-label="Renomear" title="Renomear">✏️</button>}
+                  <button onClick={() => deleteExam(exam.id)} style={{ ...iconBtn, color: "var(--danger)" }} aria-label="Excluir" title="Excluir">×</button>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 11.5, color: "var(--muted)" }}>
+                  {exam.examPdfDataUrl && <span>📄 Prova</span>}
+                  {exam.keyPdfDataUrl && <span>🔑 Gabarito</span>}
+                  {marks.pins > 0 && <span>💬 {marks.pins} {marks.pins === 1 ? "balão" : "balões"}</span>}
+                  {marks.strokes > 0 && <span>✏️ {marks.strokes} {marks.strokes === 1 ? "rascunho" : "rascunhos"}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {viewingExam && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.94)", display: "flex", flexDirection: "column" }}>
+          <div style={{ background: "var(--surface)", borderBottom: "1px solid var(--line)", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+            <span style={{ fontWeight: 600, fontSize: 15 }}>{viewingExam.title}</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              {viewingExam.examPdfDataUrl && <button onClick={() => setPdfTab("prova")} style={pdfTab === "prova" ? primaryBtn : ghostBtn}>📄 Prova</button>}
+              {viewingExam.keyPdfDataUrl && <button onClick={() => setPdfTab("gabarito")} style={pdfTab === "gabarito" ? primaryBtn : ghostBtn}>🔑 Gabarito</button>}
+              <button onClick={persistAndClose} style={primaryBtn}>Salvar e fechar</button>
+            </div>
+          </div>
+
+          <div style={{ background: "var(--surface)", borderBottom: "1px solid var(--line)", padding: "8px 16px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={() => setTool("move")} style={tool === "move" ? primaryBtn : ghostBtn} title="Só navegar e arrastar balões">🖱️ Navegar</button>
+            <button onClick={() => setTool("pen")} style={tool === "pen" ? primaryBtn : ghostBtn} title="Desenhar por cima da página">✏️ Desenhar</button>
+            <button onClick={() => setTool("erase")} style={tool === "erase" ? primaryBtn : ghostBtn} title="Apagar rascunhos">🧹 Borracha</button>
+            <button onClick={() => setTool("text")} style={tool === "text" ? primaryBtn : ghostBtn} title="Toque na página para fixar um balão">💬 Balão</button>
+            {(tool === "pen" || tool === "text") && (
+              <input type="color" value={strokeColor} onChange={(e) => setStrokeColor(e.target.value)} title="Cor" style={{ width: 30, height: 30, padding: 0, border: "none", borderRadius: "50%", cursor: "pointer", background: "none" }} />
+            )}
+            {tool === "pen" && (
+              <input type="range" min="1" max="8" value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))} title="Espessura" style={{ width: 90 }} />
+            )}
+            {tool === "text" && <span style={{ fontSize: 11.5, color: "var(--muted)" }}>toque na página para fixar um balão (vale 1 por vez) — depois toque no balão para usar as ferramentas</span>}
+            {tool === "pen" && <span style={{ fontSize: 11.5, color: "var(--muted)" }}>desenhe por cima da página</span>}
+          </div>
+
+          <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", alignItems: "center" }}>
+            {pdfLoading && pdfPages.length === 0 && <div style={{ color: "var(--muted)", padding: 40 }}>Carregando páginas...</div>}
+            {pdfError && <div style={{ color: "var(--danger)", padding: 20, fontSize: 13, textAlign: "center" }}>{pdfError}</div>}
+            <div style={{ width: "100%", maxWidth: 860 }}>
+              {pdfPages.map((pg, idx) => {
+                const pageKey = pdfTab + ":" + idx;
+                const pn = getPage(pageKey);
+                return (
+                  <ExamPageView
+                    key={pdfTab + "-" + idx}
+                    pageInfo={pg}
+                    pageIndex={idx}
+                    strokes={pn.strokes}
+                    pins={pn.pins}
+                    tool={tool}
+                    strokeColor={strokeColor}
+                    strokeWidth={strokeWidth}
+                    disarmTick={disarmTick}
+                    onDisarm={() => setDisarmTick((t) => t + 1)}
+                    onStrokeEnd={(pi, st) => handleStrokeEnd(pdfTab + ":" + pi, st)}
+                    onEraseAt={(pi, x, y) => handleEraseAt(pdfTab + ":" + pi, x, y)}
+                    onPinAdd={(pi, x, y) => handlePinAdd(pdfTab + ":" + pi, x, y)}
+                    onPinMoveEnd={(pi, id, x, y) => handlePinMoveEnd(pdfTab + ":" + pi, id, x, y)}
+                    onPinEdit={(pi, id, text) => handlePinEdit(pdfTab + ":" + pi, id, text)}
+                    onPinDelete={(pi, id) => handlePinDelete(pdfTab + ":" + pi, id)}
+                  />
+                );
+              })}
+            </div>
+            {!pdfLoading && !pdfError && pdfPages.length === 0 && (
+              <div style={{ color: "var(--muted)", padding: 40 }}>Nenhuma página para exibir.</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
