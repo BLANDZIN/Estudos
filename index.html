@@ -430,6 +430,8 @@ function StudyApp() {
   }
   // Provas salvas (com PDFs originais para visualização + anotações)
   const [savedExams, setSavedExams] = useState([]);
+  // Pacotes de estudo por assunto (módulo isolado do banco padrão)
+  const [studyPacks, setStudyPacks] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // idle | saving | saved | error
   const saveTimer = useRef(null);
@@ -448,6 +450,7 @@ function StudyApp() {
     if (Array.isArray(data.topics)) setTopics(data.topics);
     if (Array.isArray(data.notes)) setNotes(data.notes);
     if (Array.isArray(data.savedExams)) setSavedExams(data.savedExams);
+    if (Array.isArray(data.studyPacks)) setStudyPacks(data.studyPacks);
     if (data.accent) setAccent(data.accent);
     if (data.wallpaper) setWallpaper(data.wallpaper);
     if (data.appName) setAppName(data.appName);
@@ -482,7 +485,7 @@ function StudyApp() {
 
   // persist on change (debounced), skipping the very first render after load
   const latestStateRef = useRef();
-  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  latestStateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, savedExams, studyPacks, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
 
   function flushSaveNow() {
     try {
@@ -510,7 +513,7 @@ function StudyApp() {
       setSyncState(localOk ? "saved" : "error");
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
+  }, [subjects, blocks, sessions, questions, goals, topics, notes, savedExams, studyPacks, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle, loaded]);
 
   // salvamento de emergência: grava na hora (sem esperar o debounce) assim que a aba é
   // minimizada, trocada ou fechada — evita perder a última alteração feita antes de sair
@@ -560,13 +563,13 @@ function StudyApp() {
   }
 
   function exportBackup() {
-    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
+    downloadJSON({ subjects, blocks, sessions, questions, goals, topics, notes, savedExams, studyPacks, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle }, `estudos-backup-${new Date().toISOString().slice(0, 10)}.json`);
   }
 
   // backup automático opcional: baixa um .json sozinho quando há mudanças, sem substituir o backup manual
   const [autoBackup, setAutoBackup] = useState(false);
   const stateRef = useRef();
-  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, savedExams, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
+  stateRef.current = { subjects, blocks, sessions, questions, goals, topics, notes, savedExams, studyPacks, accent, wallpaper, appName, greeting, font, timerSound, celebrationEmoji, cardStyle };
   const lastAutoPayload = useRef(null);
 
   useEffect(() => {
@@ -596,6 +599,7 @@ function StudyApp() {
           if (Array.isArray(data.topics)) setTopics(data.topics);
           if (Array.isArray(data.notes)) setNotes(data.notes);
           if (Array.isArray(data.savedExams)) setSavedExams(data.savedExams);
+    if (Array.isArray(data.studyPacks)) setStudyPacks(data.studyPacks);
           if (data.accent) setAccent(data.accent);
           if (data.wallpaper !== undefined) setWallpaper(data.wallpaper);
           if (data.appName) setAppName(data.appName);
@@ -662,6 +666,7 @@ function StudyApp() {
         </div>
         {tab === "sessoes" && <Sessoes subjects={subjects} sessions={sessions} />}
         {tab === "questoes" && <QuestionBank subjects={subjects} questions={questions} setQuestions={setQuestions} setTab={setTab} celebrationEmoji={celebrationEmoji} />}
+        {tab === "estudo" && <StudyPacks packs={studyPacks} setPacks={setStudyPacks} subjects={subjects} topics={topics} />}
         {tab === "provas" && <SavedExams exams={savedExams} setExams={setSavedExams} subjects={subjects} />}
         {tab === "caderno" && <Caderno subjects={subjects} notes={notes} setNotes={setNotes} />}
         {tab === "importar" && <Importer subjects={subjects} setSubjects={setSubjects} setQuestions={setQuestions} setTab={setTab} savedExams={savedExams} setSavedExams={setSavedExams} />}
@@ -704,6 +709,7 @@ function Header({ tab, setTab, syncState, appName, timerStatusRef }) {
     { id: "calendario", label: "Calendário" },
     { id: "cronometro", label: "Cronômetro" },
     { id: "questoes", label: "Questões" },
+    { id: "estudo", label: "Estudo por Assunto" },
     { id: "provas", label: "Provas" },
     { id: "importar", label: "Importar" },
     { id: "sessoes", label: "Sessões" },
@@ -4355,6 +4361,676 @@ function Practice({ questions, queue, onAnswer, onExit, celebrationEmoji }) {
         </div>
       )}
     </Card>
+  );
+}
+
+// ---------- Estudo por Assunto (pacotes isolados do banco padrão) ----------
+const PACK_DIFF_ORDER = ["Básica", "Básica/Intermediária", "Intermediária", "Intermediária/Avançada", "Avançada"];
+const PACK_DIFF_COLORS = {
+  "Básica": "#8FBF5F",
+  "Básica/Intermediária": "#4FB4A8",
+  "Intermediária": "#E8A33D",
+  "Intermediária/Avançada": "#C4677D",
+  "Avançada": "#D97066",
+};
+
+const PACK_JSON_EXAMPLE = `{
+  "pacote": {
+    "id": "matematica_funcoes_dominio_imagem_001",
+    "nome": "Matemática — Funções — Domínio e Imagem",
+    "materia": "Matemática",
+    "assunto": "Funções",
+    "subassunto": "Domínio e imagem",
+    "quantidade": 2,
+    "dificuldade": "Progressiva",
+    "origem": "Gerado externamente",
+    "versao": "1.0",
+    "descricao": "Questões sobre domínio e imagem."
+  },
+  "questoes": [
+    {
+      "id": "q001",
+      "numero": 1,
+      "materia": "Matemática",
+      "assunto": "Funções",
+      "subassunto": "Domínio e imagem",
+      "tema": "Domínio de função polinomial",
+      "dificuldade": "Básica",
+      "tipo": "Múltipla escolha",
+      "banca": "Estilo concursos militares",
+      "enunciado": "Texto da questão...",
+      "alternativas": { "A": "...", "B": "...", "C": "...", "D": "...", "E": "..." },
+      "gabarito": "C",
+      "explicacao": "Resolução comentada...",
+      "tags": ["funções", "domínio"],
+      "verificado": true
+    }
+  ]
+}`;
+
+function buildPackPrompt(opts) {
+  const materia = (opts.materia || "Matemática").trim() || "Matemática";
+  const assunto = (opts.assunto || "").trim();
+  const subassunto = (opts.subassunto || "").trim();
+  const quantidade = Math.max(1, Math.min(200, parseInt(opts.quantidade, 10) || 20));
+  const minhas = (opts.materias || []).map((s) => (s && s.name ? String(s.name).trim() : "")).filter(Boolean);
+  const foco = [materia, assunto, subassunto].filter(Boolean).join(" › ");
+  const listaMaterias = minhas.length
+    ? 'Use estes nomes exatos no campo "materia": ' + minhas.map((m) => '"' + m + '"').join(", ") + "."
+    : "";
+  return (
+    "Você é um elaborador de questões de concursos militares brasileiros (EsPCEx, ESA, EEAR).\n" +
+    "Gere EXATAMENTE " + quantidade + " questões inéditas de múltipla escolha sobre " + foco + ".\n" +
+    "Dificuldade progressiva: comece no básico e avance até o nível militar.\n" +
+    "Retorne SOMENTE um objeto JSON válido, sem markdown, sem texto antes ou depois, neste modelo exato:\n" +
+    '{"pacote": {"id": "texto-sem-espacos", "nome": "Nome do pacote", "materia": "' + materia + '", ' +
+    '"assunto": "' + (assunto || "...") + '", "subassunto": "' + (subassunto || "...") + '", ' +
+    '"quantidade": ' + quantidade + ', "dificuldade": "Progressiva", "origem": "Gerado externamente", ' +
+    '"versao": "1.0", "descricao": "..."}, ' +
+    '"questoes": [{"id": "q001", "numero": 1, "materia": "' + materia + '", "assunto": "' + (assunto || "...") + '", ' +
+    '"subassunto": "' + (subassunto || "...") + '", "tema": "...", "dificuldade": "Básica", "tipo": "Múltipla escolha", ' +
+    '"banca": "...", "enunciado": "...", "alternativas": {"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}, ' +
+    '"gabarito": "A", "explicacao": "...", "tags": ["..."], "verificado": true}]}.\n' +
+    "Regras obrigatórias: exatamente 5 alternativas (A, B, C, D e E) com uma única correta; " +
+    "gabarito igual à alternativa correta; dificuldade somente uma de: Básica, Básica/Intermediária, " +
+    "Intermediária, Intermediária/Avançada, Avançada; ids únicos e sequenciais (q001, q002...); " +
+    "verificado true somente após conferir; sem questões duplicadas; não use imagens externas. " +
+    listaMaterias
+  ).trim();
+}
+
+function buildPackPreview(data, existingPackIds) {
+  if (!data || typeof data !== "object") throw new Error("O arquivo precisa ser um objeto JSON com pacote e questoes.");
+  const p = data.pacote;
+  if (!p || typeof p !== "object") throw new Error("Pacote inválido: objeto pacote não encontrado. Esta área aceita somente pacotes de estudo.");
+  if (!p.id || !String(p.id).trim()) throw new Error("Pacote inválido: campo pacote.id é obrigatório.");
+  if (!p.nome || !String(p.nome).trim()) throw new Error("Pacote inválido: campo pacote.nome é obrigatório.");
+  if ((existingPackIds || []).includes(String(p.id).trim())) throw new Error("Este pacote já foi importado (id: " + String(p.id).trim() + ").");
+  if (!Array.isArray(data.questoes) || data.questoes.length === 0) throw new Error("Pacote inválido: array questoes vazio ou ausente.");
+
+  const normDiff = (d) => {
+    const t = String(d == null ? "" : d).trim();
+    if (!PACK_DIFF_ORDER.includes(t)) throw new Error("Dificuldade inválida: " + (t || "(vazia)") + ". Use: " + PACK_DIFF_ORDER.join(", ") + ".");
+    return t;
+  };
+
+  const questions = data.questoes.map((q, i) => {
+    const n = i + 1;
+    if (!q || typeof q !== "object") throw new Error("Questão " + n + ": bloco inválido.");
+    if (!q.materia || !String(q.materia).trim()) throw new Error("Questão " + n + ": campo materia é obrigatório.");
+    if (!q.enunciado || !String(q.enunciado).trim()) throw new Error("Questão " + n + ": campo enunciado é obrigatório.");
+    const alts = q.alternativas && typeof q.alternativas === "object" ? q.alternativas : null;
+    if (!alts) throw new Error("Questão " + n + ": campo alternativas ausente ou inválido.");
+    const altMap = {};
+    ["A", "B", "C", "D", "E"].forEach((L) => {
+      const raw = alts[L] != null ? alts[L] : alts[L.toLowerCase()];
+      if (raw == null || !String(raw).trim()) throw new Error("Questão " + n + ": alternativa " + L + " ausente ou vazia (exigidas A, B, C, D e E).");
+      altMap[L] = String(raw).trim();
+    });
+    const gab = q.gabarito ? String(q.gabarito).toUpperCase().trim() : "";
+    if (!["A", "B", "C", "D", "E"].includes(gab)) throw new Error("Questão " + n + ": gabarito deve ser A, B, C, D ou E.");
+    return {
+      code: q.id != null && String(q.id).trim() ? String(q.id).trim().slice(0, 80) : ("q" + n),
+      numero: Number.isFinite(Number(q.numero)) ? Number(q.numero) : n,
+      materia: String(q.materia).trim().slice(0, 60),
+      assunto: (q.assunto || "").trim().slice(0, 80),
+      subassunto: (q.subassunto || "").trim().slice(0, 80),
+      tema: (q.tema || "").trim().slice(0, 120),
+      difficulty: normDiff(q.dificuldade),
+      tipo: (q.tipo || "Múltipla escolha").trim().slice(0, 40),
+      banca: (q.banca || "").trim().slice(0, 80),
+      statement: String(q.enunciado).trim(),
+      alternatives: altMap,
+      answer: gab,
+      explanation: (q.explicacao || "").trim().slice(0, 4000),
+      tags: Array.isArray(q.tags) ? q.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 8) : [],
+      verified: q.verificado === true,
+      attempts: 0, errors: 0, userAnswer: null, correct: null,
+    };
+  });
+
+  const seen = new Set();
+  questions.forEach((q) => {
+    if (seen.has(q.code)) throw new Error("Código duplicado no pacote: " + q.code);
+    seen.add(q.code);
+  });
+  questions.sort((a, b) => a.numero - b.numero);
+
+  const diffCount = {};
+  questions.forEach((q) => { diffCount[q.difficulty] = (diffCount[q.difficulty] || 0) + 1; });
+
+  return {
+    pack: {
+      packId: String(p.id).trim(),
+      nome: String(p.nome).trim().slice(0, 120),
+      materia: (p.materia || "").trim().slice(0, 60),
+      assunto: (p.assunto || "").trim().slice(0, 80),
+      subassunto: (p.subassunto || "").trim().slice(0, 80),
+      quantidade: Number.isFinite(Number(p.quantidade)) ? Number(p.quantidade) : questions.length,
+      dificuldade: (p.dificuldade || "").trim().slice(0, 40),
+      origem: (p.origem || "").trim().slice(0, 80),
+      versao: (p.versao || "").trim().slice(0, 20),
+      descricao: (p.descricao || "").trim().slice(0, 500),
+    },
+    questions,
+    diffCount,
+    withExpl: questions.filter((q) => q.explanation).length,
+  };
+}
+
+function packStats(pack) {
+  const qs = pack.questions || [];
+  const answered = qs.filter((q) => q.userAnswer != null);
+  const correct = qs.filter((q) => q.correct === true);
+  const wrong = qs.filter((q) => q.correct === false);
+  return {
+    total: qs.length,
+    answered: answered.length,
+    correct: correct.length,
+    wrong: wrong.length,
+    pct: answered.length ? Math.round((correct.length / answered.length) * 100) : null,
+  };
+}
+
+function PackImport({ onImport, existingIds }) {
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState("");
+  const [msgErr, setMsgErr] = useState(false);
+  const [preview, setPreview] = useState(null);
+
+  function analyzeRaw(raw, fromFile) {
+    setMsg(""); setMsgErr(false); setPreview(null);
+    try {
+      const data = JSON.parse(raw);
+      const pv = buildPackPreview(data, existingIds);
+      setPreview(pv);
+      setMsg(pv.questions.length + " questões válidas — confira e confirme.");
+    } catch (e) {
+      setMsg((e && e.message) || (fromFile ? "Não consegui ler esse arquivo." : "JSON inválido."));
+      setMsgErr(true);
+    }
+  }
+  function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    file.text().then((t) => analyzeRaw(t, true)).catch(() => { setMsg("Não consegui ler esse arquivo."); setMsgErr(true); });
+    e.target.value = "";
+  }
+  function confirm() {
+    if (!preview) return;
+    onImport(preview);
+    setPreview(null);
+    setText("");
+    setMsg("");
+  }
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Importar Pacote de Estudo</div>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+        Aceita somente pacotes com objeto <strong>pacote</strong> e array <strong>questoes</strong>, cada questão com
+        matéria, enunciado, alternativas A–E e gabarito. Nada aqui toca o banco padrão de questões.
+      </div>
+      {!preview ? (
+        <React.Fragment>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Cole aqui o JSON do pacote..."
+            style={{ ...input, width: "100%", height: 110, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, resize: "vertical", marginBottom: 8 }} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <button onClick={() => analyzeRaw(text, false)} style={primaryBtn} disabled={!text.trim()}>Analisar pacote</button>
+            <label style={{ ...ghostBtn, display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+              Arquivo .json
+              <input type="file" accept=".json" onChange={handleFile} style={{ display: "none" }} />
+            </label>
+          </div>
+          {msg && <div style={{ fontSize: 12, color: msgErr ? "var(--danger)" : "var(--muted)", marginBottom: 8 }}>{msg}</div>}
+        </React.Fragment>
+      ) : (
+        <React.Fragment>
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4 }}>{preview.pack.nome}</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+              {[preview.pack.materia, preview.pack.assunto, preview.pack.subassunto].filter(Boolean).join(" › ") || "—"}
+              <br />
+              {preview.questions.length} questões
+              {preview.pack.dificuldade ? ` · ${preview.pack.dificuldade}` : ""}
+              {preview.pack.versao ? ` · v${preview.pack.versao}` : ""}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+              {PACK_DIFF_ORDER.filter((d) => preview.diffCount[d]).map((d) => (
+                <span key={d} style={{ fontSize: 11, fontWeight: 700, color: PACK_DIFF_COLORS[d], background: PACK_DIFF_COLORS[d] + "22", border: `1px solid ${PACK_DIFF_COLORS[d]}`, borderRadius: 12, padding: "2px 9px" }}>
+                  {d}: {preview.diffCount[d]}
+                </span>
+              ))}
+              {preview.withExpl > 0 && (
+                <span style={{ fontSize: 11, color: "var(--muted)", border: "1px solid var(--line)", borderRadius: 12, padding: "2px 9px" }}>
+                  💡 {preview.withExpl} com explicação
+                </span>
+              )}
+            </div>
+          </div>
+          {msg && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>{msg}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={confirm} style={primaryBtn}>Confirmar importação</button>
+            <button onClick={() => { setPreview(null); setMsg(""); }} style={ghostBtn}>Descartar</button>
+          </div>
+        </React.Fragment>
+      )}
+    </Card>
+  );
+}
+
+function PackStudy({ pack, onSavePack, onExit }) {
+  const [idx, setIdx] = useState(Math.min(pack.current || 0, Math.max(0, pack.questions.length - 1)));
+  const [picked, setPicked] = useState(null);
+  const [mode, setMode] = useState("all");
+
+  const ordered = [...(pack.questions || [])].sort((a, b) => a.numero - b.numero);
+  const queue = mode === "errors" ? ordered.filter((q) => q.correct === false) : ordered;
+  const q = queue[Math.min(idx, Math.max(0, queue.length - 1))];
+  const st = packStats(pack);
+  const stDiff = PACK_DIFF_ORDER.map((d) => {
+    const qs = (pack.questions || []).filter((x) => x.difficulty === d);
+    if (!qs.length) return null;
+    const ans = qs.filter((x) => x.userAnswer != null).length;
+    const ok = qs.filter((x) => x.correct === true).length;
+    return { d, total: qs.length, ans, ok };
+  }).filter(Boolean);
+
+  function persist(nextQuestions, nextIdx) {
+    onSavePack({ ...pack, questions: nextQuestions, current: nextIdx == null ? pack.current : nextIdx });
+  }
+  function choose(letter) {
+    if (picked || !q) return;
+    setPicked(letter);
+    const ok = letter === q.answer;
+    const next = (pack.questions || []).map((x) => (
+      x.code === q.code
+        ? { ...x, userAnswer: letter, correct: ok, attempts: (x.attempts || 0) + 1, errors: (x.errors || 0) + (ok ? 0 : 1) }
+        : x
+    ));
+    persist(next, q.numero);
+  }
+  function next() {
+    setPicked(null);
+    const ni = Math.min(idx + 1, queue.length - 1);
+    setIdx(ni);
+    const nq = queue[ni];
+    if (nq) onSavePack({ ...pack, current: nq.numero });
+  }
+  function retryQuestion() {
+    if (!q) return;
+    const next = (pack.questions || []).map((x) => (x.code === q.code ? { ...x, userAnswer: null, correct: null } : x));
+    persist(next, pack.current);
+    setPicked(null);
+  }
+  function resetPack() {
+    if (!window.confirm("Zerar todo o progresso deste pacote?")) return;
+    const next = (pack.questions || []).map((x) => ({ ...x, userAnswer: null, correct: null, attempts: 0, errors: 0 }));
+    persist(next, 0);
+    setPicked(null);
+    setIdx(0);
+    setMode("all");
+  }
+
+  if (!ordered.length) {
+    return (
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{pack.nome}</div>
+        <EmptyRow text="Este pacote não tem questões." action="Voltar" onAction={onExit} />
+      </Card>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <button onClick={onExit} style={iconBtn} aria-label="Voltar aos pacotes">‹</button>
+          <span style={{ fontSize: 13.5, fontWeight: 700, flex: 1 }}>{pack.nome}</span>
+          <button onClick={resetPack} style={{ ...ghostBtn, padding: "4px 8px", fontSize: 11 }}>Zerar progresso</button>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 6 }}>
+          {[pack.materia, pack.assunto, pack.subassunto].filter(Boolean).join(" › ")}
+        </div>
+        <div style={{ height: 7, background: "var(--surface2)", borderRadius: 4, overflow: "hidden", marginBottom: 6 }}>
+          <div style={{ width: `${st.total ? Math.round((st.answered / st.total) * 100) : 0}%`, height: "100%", background: "var(--accent)", borderRadius: 4 }} />
+        </div>
+        <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>
+          {st.answered}/{st.total} respondidas · {st.correct} acertos{st.pct !== null ? ` · ${st.pct}%` : ""} · {st.wrong} erros
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+          <button onClick={() => { setMode("all"); setPicked(null); setIdx(0); }} style={mode === "all" ? primaryBtn : ghostBtn}>Estudar tudo</button>
+          <button onClick={() => { setMode("errors"); setPicked(null); setIdx(0); }} style={mode === "errors" ? primaryBtn : ghostBtn} disabled={st.wrong === 0}>
+            Revisar erros ({st.wrong})
+          </button>
+        </div>
+      </Card>
+
+      {mode === "errors" && queue.length === 0 ? (
+        <Card><EmptyRow text="Nenhum erro para revisar. 🎉" action="Estudar tudo" onAction={() => setMode("all")} /></Card>
+      ) : q ? (
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+            <span>Questão {q.numero} · {Math.min(idx + 1, queue.length)} de {queue.length}{mode === "errors" ? " (erros)" : ""}</span>
+            {q.difficulty && PACK_DIFF_COLORS[q.difficulty] ? (
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: PACK_DIFF_COLORS[q.difficulty], background: PACK_DIFF_COLORS[q.difficulty] + "22", border: `1px solid ${PACK_DIFF_COLORS[q.difficulty]}`, borderRadius: 12, padding: "1px 8px" }}>
+                {q.difficulty}
+              </span>
+            ) : null}
+          </div>
+          {q.tema ? <div style={{ fontSize: 11.5, color: "var(--accent)", fontWeight: 600, marginBottom: 6 }}>{q.tema}</div> : null}
+          <div style={{ fontSize: 14.5, marginBottom: 14, lineHeight: 1.5 }}>{q.statement}</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {["A", "B", "C", "D", "E"].filter((l) => q.alternatives && q.alternatives[l]).map((l) => {
+              const isCorrectAns = picked && l === q.answer;
+              const isWrongPick = picked && picked === l && l !== q.answer;
+              return (
+                <button key={l} onClick={() => choose(l)} disabled={!!picked} style={{
+                  textAlign: "left", padding: "10px 12px", borderRadius: 6,
+                  border: `1px solid ${isCorrectAns ? "var(--ok)" : isWrongPick ? "var(--danger)" : "var(--line)"}`,
+                  background: isCorrectAns ? "#8FBF5F1A" : isWrongPick ? "#D970661A" : "var(--surface2)",
+                  color: "var(--text)", fontSize: 13.5, cursor: picked ? "default" : "pointer",
+                }}><strong>{l})</strong> {q.alternatives[l]}</button>
+              );
+            })}
+          </div>
+          {picked && (
+            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                <span style={{ fontSize: 13, color: picked === q.answer ? "var(--ok)" : "var(--danger)", fontWeight: 600 }}>
+                  {picked === q.answer ? "Certo!" : `Errado — resposta: ${q.answer}`}
+                </span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {mode === "errors" && <button onClick={retryQuestion} style={ghostBtn}>Tentar de novo</button>}
+                  <button onClick={next} style={primaryBtn}>{idx + 1 < queue.length ? "Próxima" : "Finalizar"}</button>
+                </div>
+              </div>
+              {q.explanation ? (
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent2)", marginBottom: 4 }}>💡 Explicação</div>
+                  <div style={{ fontSize: 13, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{q.explanation}</div>
+                </div>
+              ) : null}
+            </div>
+          )}
+          {(q.tags || []).length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+              {q.tags.map((t) => (
+                <span key={t} style={{ fontSize: 10.5, color: "var(--muted)", border: "1px solid var(--line)", borderRadius: 12, padding: "1px 8px" }}>#{t}</span>
+              ))}
+            </div>
+          )}
+        </Card>
+      ) : null}
+
+      <Card>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>Por dificuldade</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {stDiff.map((r) => (
+            <div key={r.d} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+              <Dot color={PACK_DIFF_COLORS[r.d] || "#8A96A3"} size={7} />
+              <span style={{ flex: 1 }}>{r.d}</span>
+              <span style={{ color: "var(--muted)" }}>{r.ans}/{r.total}</span>
+              <span style={{ color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace", width: 70, textAlign: "right" }}>{r.ok} ok</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function PackPrompt({ subjects, topics }) {
+  const list = (subjects || []).filter((s) => s && s.name);
+  const [materia, setMateria] = useState(list[0] ? list[0].name : "Matemática");
+  const [customMateria, setCustomMateria] = useState("");
+  const [assunto, setAssunto] = useState("");
+  const [subassunto, setSubassunto] = useState("");
+  const [quantidade, setQuantidade] = useState(20);
+  const [showFormat, setShowFormat] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const isGeral = materia === "__all__";
+  const effMateria = materia === "__custom__" ? customMateria.trim() : isGeral ? list.map((s) => s.name).join(", ") : materia;
+  const prompt = buildPackPrompt({ materia: effMateria || "Matemática", assunto, subassunto, quantidade, materias: list });
+
+  // assuntos/subtemas que o usuário já tem no Guia de Estudos, para a matéria escolhida
+  // (no modo geral, de todas as matérias)
+  const effSubject = materia === "__custom__"
+    ? list.find((s) => s.name.toLowerCase() === (customMateria.trim().toLowerCase()))
+    : isGeral ? null : list.find((s) => s.name === materia);
+  const guideTopics = isGeral
+    ? (topics || []).filter((t) => list.some((s) => s.id === t.subjectId))
+    : effSubject ? (topics || []).filter((t) => t.subjectId === effSubject.id) : [];
+  function appendUnique(setter, val) {
+    setter((prev) => {
+      const parts = String(prev || "").split(",").map((p) => p.trim()).filter(Boolean);
+      if (!parts.includes(val)) parts.push(val);
+      return parts.join(", ");
+    });
+  }
+  function pickGuideTopic(t) {
+    if (isGeral) appendUnique(setAssunto, t.name);
+    else setAssunto(t.name);
+  }
+  function pickGuideSub(t, stName) {
+    if (isGeral) { appendUnique(setAssunto, t.name); appendUnique(setSubassunto, stName); }
+    else { setAssunto(t.name); setSubassunto(stName); }
+  }
+  function subjectNameOf(t) {
+    const s = list.find((x) => x.id === t.subjectId);
+    return s ? s.name : "";
+  }
+  const assuntoParts = String(assunto || "").split(",").map((p) => p.trim()).filter(Boolean);
+  const subParts = String(subassunto || "").split(",").map((p) => p.trim()).filter(Boolean);
+
+  function copyPrompt() {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(prompt).then(done).catch(done);
+    } else { done(); }
+  }
+  function copyFormat() {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(PACK_JSON_EXAMPLE).then(done).catch(done);
+    } else { done(); }
+  }
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>🤖 Gerar pacote com IA</div>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+        Monte o pedido com suas matérias, copie o prompt pronto, cole na IA de sua escolha e importe o JSON aqui.
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <select value={materia} onChange={(e) => setMateria(e.target.value)} style={input} title="Matéria (da sua lista)">
+          {list.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+          {list.length > 0 && <option value="__all__">🌐 Geral — todas as matérias</option>}
+          <option value="__custom__">✏️ Outra (digitar)</option>
+        </select>
+        {materia === "__custom__" && (
+          <input value={customMateria} onChange={(e) => setCustomMateria(e.target.value)} placeholder="Nome da matéria" style={{ ...input, flex: 1, minWidth: 130 }} />
+        )}
+        <input value={assunto} onChange={(e) => setAssunto(e.target.value)} placeholder="Assunto (ex: Funções)" style={{ ...input, flex: 1, minWidth: 130 }} />
+        <input value={subassunto} onChange={(e) => setSubassunto(e.target.value)} placeholder="Subassunto (ex: Domínio e imagem)" style={{ ...input, flex: 1, minWidth: 150 }} />
+        <input type="number" min={1} max={200} value={quantidade} onChange={(e) => setQuantidade(Number(e.target.value) || 20)} title="Quantidade de questões" style={{ ...input, width: 76 }} />
+      </div>
+      <textarea value={prompt} readOnly rows={6}
+        style={{ ...input, width: "100%", fontSize: 12, resize: "vertical", marginBottom: 8, color: "var(--muted)" }} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={copyPrompt} style={primaryBtn}>{copied ? "Copiado ✓" : "Copiar prompt pronto"}</button>
+        <button onClick={() => setShowGuide((v) => !v)} style={ghostBtn}>{showGuide ? "Ocultar guia" : "📥 Puxar assuntos do app"}</button>
+        <button onClick={() => setShowFormat((v) => !v)} style={ghostBtn}>{showFormat ? "Ocultar formato" : "Ver formato esperado"}</button>
+      </div>
+      {showGuide && (
+        <div style={{ marginTop: 8, background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, padding: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11.5, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>
+              Do seu Guia de Estudos{isGeral ? " · todas as matérias" : effSubject ? ` · ${effSubject.name}` : ""}
+            </span>
+            {guideTopics.length > 0 && (
+              <button
+                onClick={() => {
+                  setAssunto(guideTopics.map((t) => t.name).join(", "));
+                  const subs = [];
+                  guideTopics.forEach((t) => (t.subtopics || []).forEach((st) => subs.push(st.name)));
+                  setSubassunto(subs.join(", "));
+                }}
+                title="Preencher com todos os assuntos e subtemas"
+                style={{ ...ghostBtn, padding: "3px 10px", fontSize: 11.5, minHeight: "auto" }}
+              >
+                📥 Usar todos ({guideTopics.length})
+              </button>
+            )}
+          </div>
+          {!isGeral && !effSubject ? (
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>Escolha uma matéria da sua lista acima (ou digite o nome igual ao do Guia).</div>
+          ) : guideTopics.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>
+              {isGeral ? "Nenhum assunto no Guia ainda — adicione na aba Guia de Estudos." : "Nenhum assunto no Guia para essa matéria ainda — adicione na aba Guia de Estudos."}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 200, overflowY: "auto" }}>
+              {guideTopics.map((t) => (
+                <div key={t.id}>
+                  <button
+                    onClick={() => pickGuideTopic(t)}
+                    title={isGeral ? "Adicionar este assunto" : "Usar como assunto"}
+                    style={{
+                      ...ghostBtn, padding: "4px 10px", fontSize: 12.5, fontWeight: 700, marginBottom: 4,
+                      borderColor: (isGeral ? assuntoParts.includes(t.name) : assunto === t.name) ? "var(--accent)" : "var(--line)",
+                      background: (isGeral ? assuntoParts.includes(t.name) : assunto === t.name) ? "var(--accent)22" : "transparent",
+                    }}
+                  >
+                    📁 {isGeral && subjectNameOf(t) ? `${subjectNameOf(t)} › ` : ""}{t.name}
+                  </button>
+                  {(t.subtopics || []).length > 0 && (
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginLeft: 12 }}>
+                      {(t.subtopics || []).map((st) => (
+                        <button
+                          key={st.id}
+                          onClick={() => pickGuideSub(t, st.name)}
+                          title={isGeral ? "Adicionar assunto + subassunto" : "Usar assunto + subassunto"}
+                          style={{
+                            ...ghostBtn, padding: "3px 8px", fontSize: 11.5, minHeight: "auto",
+                            borderColor: (isGeral ? subParts.includes(st.name) : (subassunto === st.name && assunto === t.name)) ? "var(--accent2)" : "var(--line)",
+                            background: (isGeral ? subParts.includes(st.name) : (subassunto === st.name && assunto === t.name)) ? "var(--accent2)22" : "transparent",
+                          }}
+                        >
+                          {st.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {showFormat && (
+        <div style={{ marginTop: 8 }}>
+          <pre style={{ background: "var(--surface2)", border: "1px solid var(--line)", borderRadius: 6, padding: 10, fontSize: 11, overflowX: "auto", fontFamily: "'JetBrains Mono', monospace", whiteSpace: "pre-wrap" }}>{PACK_JSON_EXAMPLE}</pre>
+          <button onClick={copyFormat} style={{ ...ghostBtn, fontSize: 11.5, padding: "4px 8px", marginTop: 6 }}>Copiar formato</button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function StudyPacks({ packs, setPacks, subjects, topics }) {
+  const [importing, setImporting] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [openPackId, setOpenPackId] = useState(null);
+
+  function handleImport(preview) {
+    const now = new Date().toISOString();
+    const pack = {
+      id: uid(),
+      packId: preview.pack.packId,
+      nome: preview.pack.nome,
+      materia: preview.pack.materia,
+      assunto: preview.pack.assunto,
+      subassunto: preview.pack.subassunto,
+      quantidade: preview.pack.quantidade,
+      dificuldade: preview.pack.dificuldade,
+      origem: preview.pack.origem,
+      versao: preview.pack.versao,
+      descricao: preview.pack.descricao,
+      importedAt: now,
+      current: 0,
+      questions: preview.questions,
+    };
+    setPacks((prev) => [pack, ...prev]);
+    setImporting(false);
+    setOpenPackId(pack.id);
+  }
+  function savePack(updated) {
+    setPacks((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+  }
+  function deletePack(id) {
+    if (!window.confirm("Excluir este pacote e todo o progresso dele?")) return;
+    setPacks((prev) => prev.filter((p) => p.id !== id));
+    if (openPackId === id) setOpenPackId(null);
+  }
+
+  const openPack = (packs || []).find((p) => p.id === openPackId);
+  if (openPack) {
+    return <PackStudy pack={openPack} onSavePack={savePack} onExit={() => setOpenPackId(null)} />;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+          <span style={{ fontSize: 15, fontWeight: 700 }}>📚 Estudo por Assunto · {(packs || []).length}</span>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setShowPrompt((v) => !v)} style={ghostBtn}>{showPrompt ? "Fechar gerador" : "🤖 Gerar com IA"}</button>
+            <button onClick={() => setImporting((v) => !v)} style={primaryBtn}>{importing ? "Fechar" : "Importar Pacote de Estudo"}</button>
+          </div>
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+          Pacotes temáticos isolados (ex: Matemática › Funções › Domínio e imagem), com progresso próprio.
+          Nada aqui se mistura com o banco padrão de questões.
+        </div>
+      </Card>
+
+      {showPrompt && <PackPrompt subjects={subjects} topics={topics} />}
+
+      {importing && <PackImport onImport={handleImport} existingIds={(packs || []).map((p) => p.packId)} />}
+
+      {(packs || []).length === 0 && !importing && (
+        <Card><EmptyRow text="Nenhum pacote ainda. Importe seu primeiro pacote de estudo." /></Card>
+      )}
+
+      {(packs || []).map((p) => {
+        const st = packStats(p);
+        const pct = st.total ? Math.round((st.answered / st.total) * 100) : 0;
+        return (
+          <Card key={p.id}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700, flex: 1, minWidth: 160 }}>{p.nome}</span>
+              <button onClick={() => setOpenPackId(p.id)} style={primaryBtn}>{st.answered > 0 ? "Continuar" : "Começar"}</button>
+              <button onClick={() => deletePack(p.id)} style={{ ...iconBtn, color: "var(--danger)" }} aria-label="Excluir pacote">×</button>
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 6 }}>
+              {[p.materia, p.assunto, p.subassunto].filter(Boolean).join(" › ") || "—"}
+              {p.dificuldade ? ` · ${p.dificuldade}` : ""}
+              {p.versao ? ` · v${p.versao}` : ""}
+            </div>
+            <div style={{ height: 7, background: "var(--surface2)", borderRadius: 4, overflow: "hidden", marginBottom: 6 }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: "var(--accent)", borderRadius: 4 }} />
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'JetBrains Mono', monospace" }}>
+              {st.total} questões · {st.answered} respondidas · {st.correct} acertos{st.pct !== null ? ` · ${st.pct}%` : ""}
+            </div>
+            {p.descricao ? <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>{p.descricao}</div> : null}
+          </Card>
+        );
+      })}
+    </div>
   );
 }
 
